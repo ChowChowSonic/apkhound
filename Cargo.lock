@@ -74,7 +74,7 @@ dependencies = [
 ]
 
 [[package]]
-name = "apk_toolset"
+name = "apkhound"
 version = "0.1.0"
 dependencies = [
  "clap",
