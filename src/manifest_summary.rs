@@ -359,13 +359,13 @@ impl From<&AndroidManifest> for ManifestSummary {
 
         let application = manifest.application().map(|app| {
             let activities: Vec<ComponentInfo> =
-                children_by_tag(app, "activity").map(|e| extract_component(e)).collect();
+                children_by_tag(app, "activity").map(extract_component).collect();
             let services: Vec<ComponentInfo> =
-                children_by_tag(app, "service").map(|e| extract_component(e)).collect();
+                children_by_tag(app, "service").map(extract_component).collect();
             let receivers: Vec<ComponentInfo> =
-                children_by_tag(app, "receiver").map(|e| extract_component(e)).collect();
+                children_by_tag(app, "receiver").map(extract_component).collect();
             let providers: Vec<ProviderInfo> =
-                children_by_tag(app, "provider").map(|e| extract_provider(e)).collect();
+                children_by_tag(app, "provider").map(extract_provider).collect();
             let uses_libraries: Vec<LibraryInfo> =
                 children_by_tag(app, "uses-library")
                     .map(|l| LibraryInfo {
@@ -492,7 +492,7 @@ impl ManifestSummary {
             self.platform_build_version_name.as_deref(),
         );
         kv(&mut out, "Main Activity", self.main_activity.as_deref());
-        out.push_str("\n");
+        out.push('\n');
 
         out.push_str("--- SDK ---\n");
         kv(&mut out, "Min SDK Version", self.sdk.min_sdk_version.as_deref());
@@ -506,7 +506,7 @@ impl ManifestSummary {
             "Max SDK Version",
             Some(self.sdk.max_sdk_version.as_deref().unwrap_or("(none)")),
         );
-        out.push_str("\n");
+        out.push('\n');
 
         if !self.uses_permissions.is_empty() || !self.declares_permissions.is_empty() {
             out.push_str(&format!(
@@ -524,7 +524,7 @@ impl ManifestSummary {
                 }
             }
             if !self.uses_permissions.is_empty() || !self.declares_permissions.is_empty() {
-                out.push_str("\n");
+                out.push('\n');
             }
         }
 
@@ -537,12 +537,12 @@ impl ManifestSummary {
                     if let Some(r) = req {
                         out.push_str(&format!("    required: {}", r));
                     }
-                    out.push_str("\n");
+                    out.push('\n');
                 } else if let Some(ref gl) = f.gl_es_version {
                     out.push_str(&format!("    \u{2022} OpenGL ES version: {}\n", gl));
                 }
             }
-            out.push_str("\n");
+            out.push('\n');
         }
 
         if let Some(ref app) = self.application {
@@ -558,7 +558,7 @@ impl ManifestSummary {
             kv_bool(&mut out, "Large Heap", app.large_heap);
             kv_bool(&mut out, "Supports RTL", app.supports_rtl);
             kv(&mut out, "Theme", app.theme.as_deref());
-            out.push_str("\n");
+            out.push('\n');
 
             print_components(&mut out, "Activities", &app.activities);
             print_components(&mut out, "Services", &app.services);
@@ -577,7 +577,7 @@ impl ManifestSummary {
                     kv_str_indent(&mut out, "Permission", p.permission.as_deref(), 8);
                     kv_bool_indent(&mut out, "Grant URI Permissions", p.grant_uri_permissions, 8);
                 }
-                out.push_str("\n");
+                out.push('\n');
             }
 
             if !app.uses_libraries.is_empty() {
@@ -591,9 +591,9 @@ impl ManifestSummary {
                     if let Some(r) = req {
                         out.push_str(&format!("    required: {}", r));
                     }
-                    out.push_str("\n");
+                    out.push('\n');
                 }
-                out.push_str("\n");
+                out.push('\n');
             }
 
             if !app.meta_data.is_empty() {
@@ -610,7 +610,7 @@ impl ManifestSummary {
                         out.push_str(&format!("        Resource: {}\n", r));
                     }
                 }
-                out.push_str("\n");
+                out.push('\n');
             }
         }
 
@@ -627,7 +627,7 @@ impl ManifestSummary {
                 kv_bool_indent(&mut out, "Handle Profiling", i.handle_profiling, 8);
                 kv_bool_indent(&mut out, "Functional Test", i.functional_test, 8);
             }
-            out.push_str("\n");
+            out.push('\n');
         }
 
         if let Some(ref ss) = self.supports_screens {
@@ -653,7 +653,7 @@ impl ManifestSummary {
                 "Largest Width Limit DP",
                 ss.largest_width_limit_dp.as_deref(),
             );
-            out.push_str("\n");
+            out.push('\n');
         }
 
         out
