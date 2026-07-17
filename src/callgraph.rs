@@ -93,7 +93,7 @@ fn iterate_through_dex_file(
             })
             .par_bridge()
             .fold(HashMap::<String, Vec<String>>::new, |mut accum2, class| {
-                iterate_through_dex_functions(&class, &mut accum2);
+                iterate_through_dex_functions(class, &mut accum2);
                 accum2
             })
             .reduce(HashMap::<String, Vec<String>>::new, |mut tmp, mut res| {

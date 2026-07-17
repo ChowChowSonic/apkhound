@@ -12,16 +12,13 @@ use crate::utils::extract_manifest;
 use clap::Parser;
 use rayon::iter::{IntoParallelRefIterator, ParallelIterator};
 use regex::Regex;
-use smali::android::binary_xml::{self, AndroidManifest};
+use smali::android::binary_xml::AndroidManifest;
 use smali::android::zip::ApkFile;
 use smali::types::SmaliClass;
 use std::collections::HashMap;
-use std::fs::File;
-use std::io::Write;
 use std::path::PathBuf;
 use std::str::FromStr;
 use tracing::error;
-use tracing::trace;
 
 #[derive(Parser, Debug)]
 #[command(version, about, long_about = None)]
@@ -123,7 +120,7 @@ fn main() {
                     HashMap::<String, Vec<String>>::new,
                     |mut accum: HashMap<String, Vec<String>>, apk_result| {
                         if let Ok(apk) = apk_result {
-                            let res = iterate_over_dex_files(&apk, &regex);
+                            let res = iterate_over_dex_files(apk, &regex);
                             //println!("digraph {{");
                             res.iter().for_each(|(key, val)| {
                                 for y in val {
@@ -146,7 +143,7 @@ fn main() {
                     res.iter().for_each(|(k, v)| {
                         for y in v {
                             total.entry(k.to_string()).or_default().push(y.to_string());
-                            let mut x = &mut total.entry(k.to_string()).or_default();
+                            let x = &mut total.entry(k.to_string()).or_default();
                             x.sort();
                             x.dedup();
                             //println!("\"{}\" -> \"{}\"; ", x.0, y)
@@ -453,10 +450,10 @@ fn main() {
                             }
                         }
                         for (x, y) in old_attributes.iter().zip(&new_attributes) {
-                            if !new_attributes.contains(&x) {
+                            if !new_attributes.contains(x) {
                                 println!("PERMISSION REMOVED: {}", x);
                             }
-                            if !old_attributes.contains(&y) {
+                            if !old_attributes.contains(y) {
                                 println!("PERMISSION ADDED: {}", y);
                             }
                         }

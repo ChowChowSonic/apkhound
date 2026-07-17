@@ -7,7 +7,7 @@ use smali::{android::zip::ApkFile, dex::DexFile, types::SmaliClass, types::Smali
 use std::collections::HashMap;
 use std::fs::{File, create_dir_all};
 use std::io::prelude::*;
-use std::path::PathBuf;
+use std::path::Path;
 use tracing::error;
 
 pub enum EditType {
@@ -28,7 +28,7 @@ pub fn construct_java_signature(class: String, m: &SmaliMethod) -> String {
 }
 
 fn method_filename(m: &SmaliMethod) -> String {
-    let safe_name = m.name.replace('<', "").replace('>', "");
+    let safe_name = m.name.replace(['<', '>'], "");
     let args: Vec<String> = m.signature.args.iter().map(|t| t.to_java()).collect();
     format!("{}({}).smali", safe_name, args.join(", "))
 }
@@ -36,7 +36,7 @@ fn method_filename(m: &SmaliMethod) -> String {
 pub fn dump_changes_between_classes(
     new_classes: HashMap<String, SmaliClass>,
     old_classes: HashMap<String, SmaliClass>,
-    output_dir_buf: &PathBuf,
+    output_dir_buf: &Path,
     filters: &[Regex],
 ) -> Result<(), std::io::Error> {
     let new_root = output_dir_buf.join("new");
