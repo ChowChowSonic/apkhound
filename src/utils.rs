@@ -1,11 +1,11 @@
-use smali::android::binary_xml;
+use smali::android::binary_xml::AndroidManifest;
 use smali::android::zip::ApkFile;
 use tracing::error;
 pub fn extract_manifest(apk: &ApkFile) -> Result<AndroidManifest, String> {
     let manifest_entry_res = apk.entry("AndroidManifest.xml");
 
     if let Some(manifest_entry) = manifest_entry_res {
-        let doc_res = binary_xml::AndroidManifest::from_apk_entry(manifest_entry);
+        let doc_res = AndroidManifest::from_apk_entry(manifest_entry);
         match doc_res {
             Ok(doc) => Ok(doc),
             Err(e) => {
