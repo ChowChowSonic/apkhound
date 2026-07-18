@@ -125,15 +125,11 @@ pub struct ComponentInfo {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub launch_mode: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub orientation: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
     pub config_changes: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub parent_activity_name: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub screen_orientation: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub soft_input_mode: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub window_soft_input_mode: Option<String>,
 }
@@ -257,11 +253,9 @@ fn extract_component(element: &ManifestElement) -> ComponentInfo {
         process: attr_str(element, "android:process"),
         intent_filters,
         launch_mode: attr_str(element, "android:launchMode"),
-        orientation: attr_str(element, "android:screenOrientation"),
         config_changes: attr_str(element, "android:configChanges"),
         parent_activity_name: attr_str(element, "android:parentActivityName"),
         screen_orientation: attr_str(element, "android:screenOrientation"),
-        soft_input_mode: attr_str(element, "android:windowSoftInputMode"),
         window_soft_input_mode: attr_str(element, "android:windowSoftInputMode"),
     }
 }
@@ -761,9 +755,6 @@ fn print_components(out: &mut String, label: &str, components: &[ComponentInfo])
         }
         if let Some(ref l) = c.launch_mode {
             out.push_str(&format!("        Launch Mode: {}\n", l));
-        }
-        if let Some(ref o) = c.orientation {
-            out.push_str(&format!("        Orientation: {}\n", o));
         }
         if let Some(ref cc) = c.config_changes {
             out.push_str(&format!("        Config Changes: {}\n", cc));

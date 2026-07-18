@@ -5,10 +5,10 @@ use rayon::prelude::*;
 use regex::Regex;
 use rustc_hash::FxHashMap;
 use smali::android::zip::is_top_level_dex_name;
-use smali::smali_ops::DexOp;
 use smali::types::SmaliMethod;
 use smali::{android::zip::ApkFile, dex::DexFile, types::SmaliClass, types::SmaliOp};
 use std::fs::{File, create_dir_all};
+use std::hash::{Hash, Hasher};
 use std::io::prelude::*;
 use std::path::Path;
 use tracing::error;
@@ -39,7 +39,15 @@ pub fn construct_java_signature(class: String, m: &SmaliMethod) -> String {
 fn method_filename(m: &SmaliMethod) -> String {
     let safe_name = m.name.replace(['<', '>'], "");
     let args: Vec<String> = m.signature.args.iter().map(|t| t.to_java()).collect();
-    format!("{}({}).smali", safe_name, args.join(", "))
+    let name = format!("{}({}).smali", safe_name, args.join(", "));
+    if name.len() > 200 {
+        let mut hasher = std::collections::hash_map::DefaultHasher::new();
+        name.hash(&mut hasher);
+        let hash = hasher.finish();
+        format!("{}_{:016x}.smali", safe_name, hash)
+    } else {
+        name
+    }
 }
 
 /// For each changed / added / removed method, write the old and new smali to
@@ -88,18 +96,18 @@ pub fn dump_changes_between_classes(
                         create_dir_all(&new_dir)?;
 
                         let fname = method_filename(new_method);
-                        let mut f = File::create_new(new_dir.join(&fname))?;
+                        let mut f = File::create(new_dir.join(&fname))?;
                         write!(f, "{}", filtered_smali(new_method))?;
 
                         let fname = method_filename(old_method);
-                        let mut f = File::create_new(old_dir.join(&fname))?;
+                        let mut f = File::create(old_dir.join(&fname))?;
                         write!(f, "{}", filtered_smali(old_method))?;
                     }
                     None => {
                         let new_dir = new_root.join(&class_dir);
                         create_dir_all(&new_dir)?;
                         let fname = method_filename(new_method);
-                        let mut f = File::create_new(new_dir.join(&fname))?;
+                        let mut f = File::create(new_dir.join(&fname))?;
                         write!(f, "{}", filtered_smali(new_method))?;
                     }
                     _ => {}
@@ -116,7 +124,7 @@ pub fn dump_changes_between_classes(
                     let old_dir = old_root.join(&class_dir);
                     create_dir_all(&old_dir)?;
                     let fname = method_filename(old_method);
-                    let mut f = File::create_new(old_dir.join(&fname))?;
+                    let mut f = File::create(old_dir.join(&fname))?;
                     write!(f, "{}", filtered_smali(old_method))?;
                 }
             }
@@ -125,7 +133,7 @@ pub fn dump_changes_between_classes(
             for new_method in &class.methods {
                 create_dir_all(&new_dir)?;
                 let fname = method_filename(new_method);
-                let mut f = File::create_new(new_dir.join(&fname))?;
+                let mut f = File::create(new_dir.join(&fname))?;
                 write!(f, "{}", filtered_smali(new_method))?;
             }
         }
@@ -207,28 +215,18 @@ pub fn find_changes_between_classes(
 /// Check whether two methods have the same sequence of `DexOp` discriminants
 /// (ignoring operands).  A structural equality check for smali methods.
 pub fn functions_match(old: &SmaliMethod, new: &SmaliMethod) -> bool {
-    let old_ops: Vec<&DexOp> = old
-        .ops
+    if old.ops.len() != new.ops.len() {
+        return false;
+    }
+    old.ops
         .iter()
-        .filter_map(|op| match op {
-            SmaliOp::Op(d) => Some(d),
-            _ => None,
+        .zip(new.ops.iter())
+        .all(|(a, b)| match (a, b) {
+            (SmaliOp::Op(a), SmaliOp::Op(b)) => {
+                std::mem::discriminant(a) == std::mem::discriminant(b)
+            }
+            _ => std::mem::discriminant(a) == std::mem::discriminant(b),
         })
-        .collect();
-    let new_ops: Vec<&DexOp> = new
-        .ops
-        .iter()
-        .filter_map(|op| match op {
-            SmaliOp::Op(d) => Some(d),
-            _ => None,
-        })
-        .collect();
-
-    old_ops.len() == new_ops.len()
-        && old_ops
-            .iter()
-            .zip(&new_ops)
-            .all(|(a, b)| std::mem::discriminant(*a) == std::mem::discriminant(*b))
 }
 
 fn unpack_dex_file(dex: DexFile, filters: &[Regex], accum: &mut Vec<SmaliClass>) {
@@ -275,7 +273,7 @@ pub fn unpack_apk_classes(apk: &ApkFile, filters: &[Regex]) -> Vec<SmaliClass> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use smali::smali_ops::{Label, MethodRef};
+    use smali::smali_ops::{DexOp, Label, MethodRef};
     use smali::types::MethodSignature;
 
     fn make_method(name: &str, sig: &str, ops: Vec<SmaliOp>) -> SmaliMethod {
@@ -390,6 +388,91 @@ mod tests {
         match e {
             EditType::Remove(s) => assert_eq!(s, "com.example.Test: void baz()"),
             _ => panic!("expected Remove"),
+        }
+    }
+
+    #[test]
+    fn test_functions_match_different_label_count() {
+        let a = make_method(
+            "foo",
+            "()V",
+            vec![
+                SmaliOp::Label(Label("L1".to_string())),
+                SmaliOp::Op(DexOp::ReturnVoid),
+            ],
+        );
+        let b = make_method("foo", "()V", vec![SmaliOp::Op(DexOp::ReturnVoid)]);
+        assert!(!functions_match(&a, &b));
+    }
+
+    #[test]
+    fn test_functions_match_different_debug_presence() {
+        let a = make_method(
+            "foo",
+            "()V",
+            vec![SmaliOp::Prologue, SmaliOp::Op(DexOp::ReturnVoid)],
+        );
+        let b = make_method("foo", "()V", vec![SmaliOp::Op(DexOp::ReturnVoid)]);
+        assert!(!functions_match(&a, &b));
+    }
+
+    #[test]
+    fn test_functions_match_same_non_op_ops() {
+        let a = make_method(
+            "foo",
+            "()V",
+            vec![
+                SmaliOp::Prologue,
+                SmaliOp::Op(DexOp::ReturnVoid),
+                SmaliOp::Epilogue,
+            ],
+        );
+        let b = make_method(
+            "foo",
+            "()V",
+            vec![
+                SmaliOp::Prologue,
+                SmaliOp::Op(DexOp::ReturnVoid),
+                SmaliOp::Epilogue,
+            ],
+        );
+        assert!(functions_match(&a, &b));
+    }
+
+    #[test]
+    fn test_method_filename_short() {
+        let m = make_method("foo", "()V", vec![]);
+        let name = method_filename(&m);
+        assert_eq!(name, "foo().smali");
+    }
+
+    #[test]
+    fn test_method_filename_long_signature_truncated() {
+        let long_jni = format!(
+            "(L{desc};L{desc};L{desc};L{desc};L{desc};L{desc};L{desc};L{desc};L{desc};L{desc};)V",
+            desc = "android/content/ContentProviderClient"
+        );
+        let m = make_method("veryLongMethod", &long_jni, vec![]);
+        let name = method_filename(&m);
+        assert!(name.len() < 255, "filename length: {}", name.len());
+        assert!(
+            name.starts_with("veryLongMethod_"),
+            "expected hash suffix, got: {name}"
+        );
+        assert!(name.ends_with(".smali"));
+    }
+
+    #[test]
+    fn test_method_filename_same_name_different_sigs_different_hash() {
+        let m1 = make_method("foo", "(I)V", vec![]);
+        let m2 = make_method("foo", "(J)V", vec![]);
+        let n1 = method_filename(&m1);
+        let n2 = method_filename(&m2);
+        if n1.len() > 200 {
+            assert_ne!(
+                n1, n2,
+                "different signatures should produce different hashed names"
+            );
         }
     }
 }

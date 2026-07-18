@@ -30,11 +30,11 @@ pub fn handle_permissions(old_apk: PathBuf, new_apk: Option<PathBuf>) -> Result<
             }
             (Err(old), _) => {
                 error!("Unable to parse old APK due to reason: {old}");
-                Err("Unable to parse old apk".to_string())
+                Err(format!("Error parsing old apk: {old}"))
             }
             (_, Err(new)) => {
                 error!("Unable to parse new APK due to reason: {new}");
-                Err("Unable to parse new apk".to_string())
+                Err(format!("Error parsing new apk: {new}"))
             }
         }
     } else {
@@ -46,7 +46,7 @@ pub fn handle_permissions(old_apk: PathBuf, new_apk: Option<PathBuf>) -> Result<
                 })?;
                 for x in manifest.uses_permissions() {
                     for y in x.attributes.iter().filter_map(|t| t.raw_value.clone()) {
-                        println!("{y:?}");
+                        println!("{y}");
                     }
                 }
                 Ok(())

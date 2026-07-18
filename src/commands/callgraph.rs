@@ -28,13 +28,10 @@ pub fn handle_callgraph(apk_path: Vec<PathBuf>, filters: Vec<String>) -> Result<
                 if let Ok(apk) = apk_result {
                     let res = iterate_over_dex_files(apk, &regex);
                     res.iter().for_each(|(key, val)| {
-                        for y in val {
-                            accum
-                                .entry(key.to_string())
-                                .and_modify(|tmp| tmp.push(y.to_string()))
-                                .or_default()
-                                .push(y.to_string());
-                        }
+                        accum
+                            .entry(key.to_string())
+                            .or_default()
+                            .extend(val.iter().cloned());
                     });
                 } else if let Err(e) = apk_result {
                     error!("Failed to parse APK file: {e}");
@@ -46,7 +43,10 @@ pub fn handle_callgraph(apk_path: Vec<PathBuf>, filters: Vec<String>) -> Result<
             FxHashMap::<String, Vec<String>>::default,
             |mut total, res| {
                 for (k, v) in &res {
-                    total.entry(k.clone()).or_default().extend(v.iter().cloned());
+                    total
+                        .entry(k.clone())
+                        .or_default()
+                        .extend(v.iter().cloned());
                 }
                 total
             },

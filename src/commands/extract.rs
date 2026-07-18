@@ -58,7 +58,8 @@ pub fn handle_extract(
                         accum
                     },
                 );
-            let _ = dump_changes_between_classes(new_classes, old_classes, &output_dir, &smali_regex);
+            dump_changes_between_classes(new_classes, old_classes, &output_dir, &smali_regex)
+                .map_err(|e| format!("Failed to write extracted smali files: {e}"))?;
             Ok(())
         }
         (Err(old), _) => {
