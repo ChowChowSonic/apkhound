@@ -1,6 +1,6 @@
 use apkhound::commands::callgraph::handle_callgraph;
 use apkhound::commands::compare::handle_compare;
-use apkhound::commands::match_cmd::{handle_match, MatchConfig};
+use apkhound::commands::match_cmd::{MatchConfig, handle_match};
 use criterion::{Criterion, black_box, criterion_group, criterion_main};
 use std::path::PathBuf;
 
@@ -37,12 +37,7 @@ fn bench_callgraph(c: &mut Criterion) {
     let mut group = c.benchmark_group("callgraph");
     group.sample_size(1000);
     group.bench_function("callgraph", |b| {
-        b.iter(|| {
-            handle_callgraph(
-                black_box(apk_path.clone()),
-                black_box(filters.clone()),
-            )
-        });
+        b.iter(|| handle_callgraph(black_box(apk_path.clone()), black_box(filters.clone())));
     });
     group.finish();
 }

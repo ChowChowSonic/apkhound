@@ -526,8 +526,16 @@ pub fn run_match(
     let (old_sigs, new_sigs, old_names, new_names, old_no_graph, new_no_graph) =
         compute_sigs_and_names(&old_data, &new_data, wl_iterations);
     let results = match_packages(
-        SideData { sigs: &old_sigs, names: &old_names, no_graph: &old_no_graph },
-        SideData { sigs: &new_sigs, names: &new_names, no_graph: &new_no_graph },
+        SideData {
+            sigs: &old_sigs,
+            names: &old_names,
+            no_graph: &old_no_graph,
+        },
+        SideData {
+            sigs: &new_sigs,
+            names: &new_names,
+            no_graph: &new_no_graph,
+        },
         match_threshold,
         change_threshold,
     );
@@ -871,8 +879,16 @@ mod tests {
         let old_names = vec!["pkgA".to_string()];
         let new_names = vec!["pkgA".to_string()];
         let results = match_packages(
-            SideData { sigs: &old_sigs, names: &old_names, no_graph: &[] },
-            SideData { sigs: &new_sigs, names: &new_names, no_graph: &[] },
+            SideData {
+                sigs: &old_sigs,
+                names: &old_names,
+                no_graph: &[],
+            },
+            SideData {
+                sigs: &new_sigs,
+                names: &new_names,
+                no_graph: &[],
+            },
             0.8,
             0.0,
         );
@@ -891,8 +907,16 @@ mod tests {
         let old_names = vec!["pkgOld".to_string()];
         let new_names: Vec<String> = vec![];
         let results = match_packages(
-            SideData { sigs: &old_sigs, names: &old_names, no_graph: &[] },
-            SideData { sigs: &new_sigs, names: &new_names, no_graph: &[] },
+            SideData {
+                sigs: &old_sigs,
+                names: &old_names,
+                no_graph: &[],
+            },
+            SideData {
+                sigs: &new_sigs,
+                names: &new_names,
+                no_graph: &[],
+            },
             0.8,
             0.0,
         );
@@ -909,8 +933,16 @@ mod tests {
         let old_names: Vec<String> = vec![];
         let new_names = vec!["pkgNew".to_string()];
         let results = match_packages(
-            SideData { sigs: &old_sigs, names: &old_names, no_graph: &[] },
-            SideData { sigs: &new_sigs, names: &new_names, no_graph: &[] },
+            SideData {
+                sigs: &old_sigs,
+                names: &old_names,
+                no_graph: &[],
+            },
+            SideData {
+                sigs: &new_sigs,
+                names: &new_names,
+                no_graph: &[],
+            },
             0.8,
             0.0,
         );
@@ -921,8 +953,16 @@ mod tests {
     #[test]
     fn test_match_packages_no_graph() {
         let results = match_packages(
-            SideData { sigs: &FxHashMap::default(), names: &[], no_graph: &["pkgEmpty".to_string()] },
-            SideData { sigs: &FxHashMap::default(), names: &[], no_graph: &[] },
+            SideData {
+                sigs: &FxHashMap::default(),
+                names: &[],
+                no_graph: &["pkgEmpty".to_string()],
+            },
+            SideData {
+                sigs: &FxHashMap::default(),
+                names: &[],
+                no_graph: &[],
+            },
             0.8,
             0.0,
         );

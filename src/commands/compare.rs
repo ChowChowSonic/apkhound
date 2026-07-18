@@ -1,13 +1,13 @@
 //! Handler for the `compare` subcommand — diffs two APKs at the
 //! method-signature level and prints added / removed / changed methods.
 
-use crate::compare::{unpack_apk_classes, find_changes_between_classes, EditType};
+use crate::compare::{EditType, find_changes_between_classes, unpack_apk_classes};
 use crate::utils::build_regex;
 use rayon::iter::{IntoParallelRefIterator, ParallelIterator};
 use regex::Regex;
+use rustc_hash::FxHashMap;
 use smali::android::zip::ApkFile;
 use smali::types::SmaliClass;
-use rustc_hash::FxHashMap;
 use std::path::PathBuf;
 use tracing::error;
 
@@ -25,20 +25,26 @@ pub fn handle_compare(old_apk: PathBuf, new_apk: PathBuf, filters: Vec<String>) 
         let regex: Vec<Regex> = build_regex(&filters);
         let old_classes = unpack_apk_classes(old, &regex)
             .par_iter()
-            .fold(FxHashMap::<String, SmaliClass>::default, |mut accum, item| {
-                accum.insert(item.name.as_java_type(), item.clone());
-                accum
-            })
+            .fold(
+                FxHashMap::<String, SmaliClass>::default,
+                |mut accum, item| {
+                    accum.insert(item.name.as_java_type(), item.clone());
+                    accum
+                },
+            )
             .reduce(FxHashMap::default, |mut accum, mut res| {
                 accum.extend(res.drain());
                 accum
             });
         let new_classes = unpack_apk_classes(new, &regex)
             .par_iter()
-            .fold(FxHashMap::<String, SmaliClass>::default, |mut accum, item| {
-                accum.insert(item.name.as_java_type(), item.clone());
-                accum
-            })
+            .fold(
+                FxHashMap::<String, SmaliClass>::default,
+                |mut accum, item| {
+                    accum.insert(item.name.as_java_type(), item.clone());
+                    accum
+                },
+            )
             .reduce(FxHashMap::default, |mut accum, mut res| {
                 accum.extend(res.drain());
                 accum

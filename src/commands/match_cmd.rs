@@ -23,11 +23,7 @@ pub struct MatchConfig {
 /// Run package matching between two APKs and output the results as either a
 /// formatted table or CSV.  When `show_details` is set, per-package method
 /// counts and match scores are also printed.
-pub fn handle_match(
-    old_apk: PathBuf,
-    new_apk: PathBuf,
-    cfg: MatchConfig,
-) {
+pub fn handle_match(old_apk: PathBuf, new_apk: PathBuf, cfg: MatchConfig) {
     let apks: Vec<Result<ApkFile, _>> = vec![old_apk, new_apk]
         .par_iter()
         .map(ApkFile::from_file)
@@ -162,10 +158,8 @@ pub fn handle_match(
                             println!("  {}  (added)", pkg_display(new_name));
                         }
                         _ => {
-                            let old_m: usize =
-                                old_pkg_methods.get(old_name).copied().unwrap_or(0);
-                            let new_m: usize =
-                                new_pkg_methods.get(new_name).copied().unwrap_or(0);
+                            let old_m: usize = old_pkg_methods.get(old_name).copied().unwrap_or(0);
+                            let new_m: usize = new_pkg_methods.get(new_name).copied().unwrap_or(0);
                             println!(
                                 "  {}  <->  {}  (methods {}->{} | score={})",
                                 pkg_display(old_name),

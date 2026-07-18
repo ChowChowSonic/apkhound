@@ -34,10 +34,7 @@ fn children_by_tag<'a>(
     element.children.iter().filter(move |c| c.tag == tag)
 }
 
-fn first_child_by_tag<'a>(
-    element: &'a ManifestElement,
-    tag: &str,
-) -> Option<&'a ManifestElement> {
+fn first_child_by_tag<'a>(element: &'a ManifestElement, tag: &str) -> Option<&'a ManifestElement> {
     element.children.iter().find(|c| c.tag == tag)
 }
 
@@ -224,9 +221,7 @@ pub struct SupportsScreensInfo {
     pub largest_width_limit_dp: Option<String>,
 }
 
-fn extract_component(
-    element: &ManifestElement,
-) -> ComponentInfo {
+fn extract_component(element: &ManifestElement) -> ComponentInfo {
     let intent_filters: Vec<IntentFilterInfo> = children_by_tag(element, "intent-filter")
         .map(|intent_filter| {
             let actions: Vec<String> = children_by_tag(intent_filter, "action")
@@ -318,24 +313,21 @@ impl From<&AndroidManifest> for ManifestSummary {
     fn from(manifest: &AndroidManifest) -> Self {
         let root = manifest.root();
         let package_name = manifest.package_name().map(|s| s.to_string());
-        let version_code = manifest
-            .root()
-            .attribute_value("android:versionCode")
-            .map(|v| match v {
-                ManifestValue::Integer(i) => i.to_string(),
-                ManifestValue::String(s) => s.clone(),
-                _ => format!("{:?}", v),
-            });
+        let version_code =
+            manifest
+                .root()
+                .attribute_value("android:versionCode")
+                .map(|v| match v {
+                    ManifestValue::Integer(i) => i.to_string(),
+                    ManifestValue::String(s) => s.clone(),
+                    _ => format!("{:?}", v),
+                });
         let version_name = manifest.version_name().map(|s| s.to_string());
         let install_location = attr_str(root, "android:installLocation");
-        let platform_build_version_code =
-            attr_str(root, "platformBuildVersionCode").or_else(|| {
-                attr_str(root, "android:platformBuildVersionCode")
-            });
-        let platform_build_version_name =
-            attr_str(root, "platformBuildVersionName").or_else(|| {
-                attr_str(root, "android:platformBuildVersionName")
-            });
+        let platform_build_version_code = attr_str(root, "platformBuildVersionCode")
+            .or_else(|| attr_str(root, "android:platformBuildVersionCode"));
+        let platform_build_version_name = attr_str(root, "platformBuildVersionName")
+            .or_else(|| attr_str(root, "android:platformBuildVersionName"));
 
         let uses_sdk = first_child_by_tag(root, "uses-sdk");
         let sdk = SdkInfo {
@@ -356,16 +348,15 @@ impl From<&AndroidManifest> for ManifestSummary {
             .filter_map(|p| attr_str(p, "android:name"))
             .collect();
 
-        let declares_permissions: Vec<PermissionDecl> =
-            children_by_tag(root, "permission")
-                .map(|p| PermissionDecl {
-                    name: attr_str(p, "android:name").unwrap_or_default(),
-                    protection_level: attr_str(p, "android:protectionLevel"),
-                    label: attr_str(p, "android:label"),
-                    description: attr_str(p, "android:description"),
-                    permission_group: attr_str(p, "android:permissionGroup"),
-                })
-                .collect();
+        let declares_permissions: Vec<PermissionDecl> = children_by_tag(root, "permission")
+            .map(|p| PermissionDecl {
+                name: attr_str(p, "android:name").unwrap_or_default(),
+                protection_level: attr_str(p, "android:protectionLevel"),
+                label: attr_str(p, "android:label"),
+                description: attr_str(p, "android:description"),
+                permission_group: attr_str(p, "android:permissionGroup"),
+            })
+            .collect();
 
         let uses_features: Vec<FeatureInfo> = children_by_tag(root, "uses-feature")
             .map(|f| FeatureInfo {
@@ -376,29 +367,31 @@ impl From<&AndroidManifest> for ManifestSummary {
             .collect();
 
         let application = manifest.application().map(|app| {
-            let activities: Vec<ComponentInfo> =
-                children_by_tag(app, "activity").map(extract_component).collect();
-            let services: Vec<ComponentInfo> =
-                children_by_tag(app, "service").map(extract_component).collect();
-            let receivers: Vec<ComponentInfo> =
-                children_by_tag(app, "receiver").map(extract_component).collect();
-            let providers: Vec<ProviderInfo> =
-                children_by_tag(app, "provider").map(extract_provider).collect();
-            let uses_libraries: Vec<LibraryInfo> =
-                children_by_tag(app, "uses-library")
-                    .map(|l| LibraryInfo {
-                        name: attr_str(l, "android:name").unwrap_or_default(),
-                        required: attr_bool(l, "android:required"),
-                    })
-                    .collect();
-            let meta_data: Vec<MetaDataInfo> =
-                children_by_tag(app, "meta-data")
-                    .map(|m| MetaDataInfo {
-                        name: attr_str(m, "android:name").unwrap_or_default(),
-                        value: attr_str(m, "android:value"),
-                        resource: attr_str(m, "android:resource"),
-                    })
-                    .collect();
+            let activities: Vec<ComponentInfo> = children_by_tag(app, "activity")
+                .map(extract_component)
+                .collect();
+            let services: Vec<ComponentInfo> = children_by_tag(app, "service")
+                .map(extract_component)
+                .collect();
+            let receivers: Vec<ComponentInfo> = children_by_tag(app, "receiver")
+                .map(extract_component)
+                .collect();
+            let providers: Vec<ProviderInfo> = children_by_tag(app, "provider")
+                .map(extract_provider)
+                .collect();
+            let uses_libraries: Vec<LibraryInfo> = children_by_tag(app, "uses-library")
+                .map(|l| LibraryInfo {
+                    name: attr_str(l, "android:name").unwrap_or_default(),
+                    required: attr_bool(l, "android:required"),
+                })
+                .collect();
+            let meta_data: Vec<MetaDataInfo> = children_by_tag(app, "meta-data")
+                .map(|m| MetaDataInfo {
+                    name: attr_str(m, "android:name").unwrap_or_default(),
+                    value: attr_str(m, "android:value"),
+                    resource: attr_str(m, "android:resource"),
+                })
+                .collect();
 
             ApplicationSummary {
                 label: attr_str(app, "android:label"),
@@ -425,26 +418,33 @@ impl From<&AndroidManifest> for ManifestSummary {
         let main_activity = application.as_ref().and_then(|app| {
             app.activities.iter().find_map(|a| {
                 let is_launcher = a.intent_filters.iter().any(|f| {
-                    f.actions.iter().any(|act| act == "android.intent.action.MAIN")
-                        && f.categories.iter().any(|cat| cat == "android.intent.category.LAUNCHER")
+                    f.actions
+                        .iter()
+                        .any(|act| act == "android.intent.action.MAIN")
+                        && f.categories
+                            .iter()
+                            .any(|cat| cat == "android.intent.category.LAUNCHER")
                 });
-                if is_launcher { Some(a.name.clone()) } else { None }
+                if is_launcher {
+                    Some(a.name.clone())
+                } else {
+                    None
+                }
             })
         });
 
-        let instrumentation: Vec<InstrumentationInfo> =
-            children_by_tag(root, "instrumentation")
-                .map(|i| InstrumentationInfo {
-                    name: attr_str(i, "android:name").unwrap_or_default(),
-                    target_package: attr_str(i, "android:targetPackage"),
-                    label: attr_str(i, "android:label"),
-                    handle_profiling: attr_bool(i, "android:handleProfiling"),
-                    functional_test: attr_bool(i, "android:functionalTest"),
-                })
-                .collect();
+        let instrumentation: Vec<InstrumentationInfo> = children_by_tag(root, "instrumentation")
+            .map(|i| InstrumentationInfo {
+                name: attr_str(i, "android:name").unwrap_or_default(),
+                target_package: attr_str(i, "android:targetPackage"),
+                label: attr_str(i, "android:label"),
+                handle_profiling: attr_bool(i, "android:handleProfiling"),
+                functional_test: attr_bool(i, "android:functionalTest"),
+            })
+            .collect();
 
-        let supports_screens = first_child_by_tag(root, "supports-screens").map(|s| {
-            SupportsScreensInfo {
+        let supports_screens =
+            first_child_by_tag(root, "supports-screens").map(|s| SupportsScreensInfo {
                 resizeable: attr_bool(s, "android:resizeable"),
                 small_screens: attr_bool(s, "android:smallScreens"),
                 normal_screens: attr_bool(s, "android:normalScreens"),
@@ -454,8 +454,7 @@ impl From<&AndroidManifest> for ManifestSummary {
                 requires_smallest_width_dp: attr_str(s, "android:requiresSmallestWidthDp"),
                 compatible_width_limit_dp: attr_str(s, "android:compatibleWidthLimitDp"),
                 largest_width_limit_dp: attr_str(s, "android:largestWidthLimitDp"),
-            }
-        });
+            });
 
         ManifestSummary {
             package_name,
@@ -501,7 +500,11 @@ impl ManifestSummary {
         kv(&mut out, "Package", self.package_name.as_deref());
         kv(&mut out, "Version Code", self.version_code.as_deref());
         kv(&mut out, "Version Name", self.version_name.as_deref());
-        kv(&mut out, "Install Location", self.install_location.as_deref());
+        kv(
+            &mut out,
+            "Install Location",
+            self.install_location.as_deref(),
+        );
         kv(
             &mut out,
             "Platform Build Version Code",
@@ -516,7 +519,11 @@ impl ManifestSummary {
         out.push('\n');
 
         out.push_str("--- SDK ---\n");
-        kv(&mut out, "Min SDK Version", self.sdk.min_sdk_version.as_deref());
+        kv(
+            &mut out,
+            "Min SDK Version",
+            self.sdk.min_sdk_version.as_deref(),
+        );
         kv(
             &mut out,
             "Target SDK Version",
@@ -550,7 +557,10 @@ impl ManifestSummary {
         }
 
         if !self.uses_features.is_empty() {
-            out.push_str(&format!("--- Features ({}) ---\n", self.uses_features.len()));
+            out.push_str(&format!(
+                "--- Features ({}) ---\n",
+                self.uses_features.len()
+            ));
             for f in &self.uses_features {
                 if let Some(ref name) = f.name {
                     let req = f.required.map(|r| if r { "yes" } else { "no" });
@@ -586,7 +596,10 @@ impl ManifestSummary {
             print_components(&mut out, "Receivers", &app.receivers);
 
             if !app.providers.is_empty() {
-                out.push_str(&format!("\n    --- Providers ({}) ---\n", app.providers.len()));
+                out.push_str(&format!(
+                    "\n    --- Providers ({}) ---\n",
+                    app.providers.len()
+                ));
                 for p in &app.providers {
                     out.push_str(&format!("    \u{2022} {}\n", p.name));
                     if let Some(ref a) = p.authorities {
@@ -594,9 +607,19 @@ impl ManifestSummary {
                     }
                     kv_bool_indent(&mut out, "Exported", p.exported, 8);
                     kv_str_indent(&mut out, "Read Permission", p.read_permission.as_deref(), 8);
-                    kv_str_indent(&mut out, "Write Permission", p.write_permission.as_deref(), 8);
+                    kv_str_indent(
+                        &mut out,
+                        "Write Permission",
+                        p.write_permission.as_deref(),
+                        8,
+                    );
                     kv_str_indent(&mut out, "Permission", p.permission.as_deref(), 8);
-                    kv_bool_indent(&mut out, "Grant URI Permissions", p.grant_uri_permissions, 8);
+                    kv_bool_indent(
+                        &mut out,
+                        "Grant URI Permissions",
+                        p.grant_uri_permissions,
+                        8,
+                    );
                 }
                 out.push('\n');
             }
@@ -719,10 +742,16 @@ fn print_components(out: &mut String, label: &str, components: &[ComponentInfo])
     for c in components {
         out.push_str(&format!("    \u{2022} {}\n", c.name));
         if let Some(e) = c.exported {
-            out.push_str(&format!("        Exported: {}\n", if e { "true" } else { "false" }));
+            out.push_str(&format!(
+                "        Exported: {}\n",
+                if e { "true" } else { "false" }
+            ));
         }
         if let Some(e) = c.enabled {
-            out.push_str(&format!("        Enabled: {}\n", if e { "true" } else { "false" }));
+            out.push_str(&format!(
+                "        Enabled: {}\n",
+                if e { "true" } else { "false" }
+            ));
         }
         if let Some(ref p) = c.permission {
             out.push_str(&format!("        Permission: {}\n", p));

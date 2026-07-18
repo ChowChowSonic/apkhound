@@ -102,7 +102,9 @@ fn test_compare() {
         .expect("failed to run apkhound compare");
     assert!(output.status.success());
     let stdout = String::from_utf8_lossy(&output.stdout);
-    assert!(stdout.contains("ADDED:") || stdout.contains("REMOVED:") || stdout.contains("CHANGED:"));
+    assert!(
+        stdout.contains("ADDED:") || stdout.contains("REMOVED:") || stdout.contains("CHANGED:")
+    );
 }
 
 #[test]
@@ -143,7 +145,12 @@ fn test_match() {
     assert!(output.status.success());
     let stdout = String::from_utf8_lossy(&output.stdout);
     assert!(stdout.contains("Package (old)"));
-    assert!(stdout.contains("MATCH") || stdout.contains("CHANGED") || stdout.contains("NEW") || stdout.contains("REMOVED"));
+    assert!(
+        stdout.contains("MATCH")
+            || stdout.contains("CHANGED")
+            || stdout.contains("NEW")
+            || stdout.contains("REMOVED")
+    );
 }
 
 #[test]

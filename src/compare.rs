@@ -3,11 +3,11 @@
 
 use rayon::prelude::*;
 use regex::Regex;
+use rustc_hash::FxHashMap;
 use smali::android::zip::is_top_level_dex_name;
 use smali::smali_ops::DexOp;
 use smali::types::SmaliMethod;
 use smali::{android::zip::ApkFile, dex::DexFile, types::SmaliClass, types::SmaliOp};
-use rustc_hash::FxHashMap;
 use std::fs::{File, create_dir_all};
 use std::io::prelude::*;
 use std::path::Path;
@@ -227,7 +227,10 @@ fn unpack_dex_file(dex: DexFile, filters: &[Regex], accum: &mut Vec<SmaliClass>)
 /// Read every DEX entry in an APK and return all `SmaliClass` values that
 /// match the optional regex filters.
 pub fn unpack_apk_classes(apk: &ApkFile, filters: &[Regex]) -> Vec<SmaliClass> {
-    let entry_names: Vec<_> = apk.entry_names().filter(|x| is_top_level_dex_name(x)).collect();
+    let entry_names: Vec<_> = apk
+        .entry_names()
+        .filter(|x| is_top_level_dex_name(x))
+        .collect();
     entry_names.par_iter()
         .fold(Vec::<SmaliClass>::new, |mut accum, x| {
             let entry_res = apk.entry(x);
@@ -311,20 +314,33 @@ mod tests {
             descriptor: "()V".to_string(),
         };
         let a = make_method("foo", "()V", vec![SmaliOp::Op(DexOp::ReturnVoid)]);
-        let b = make_method("foo", "()V", vec![
-            SmaliOp::Op(DexOp::InvokeVirtual { registers: vec![], method: mref }),
-        ]);
+        let b = make_method(
+            "foo",
+            "()V",
+            vec![SmaliOp::Op(DexOp::InvokeVirtual {
+                registers: vec![],
+                method: mref,
+            })],
+        );
         assert!(!functions_match(&a, &b));
     }
 
     #[test]
     fn test_functions_match_different_operands_same_discriminant() {
-        let a = make_method("foo", "()V", vec![
-            SmaliOp::Op(DexOp::Goto { offset: Label("L1".to_string()) }),
-        ]);
-        let b = make_method("foo", "()V", vec![
-            SmaliOp::Op(DexOp::Goto { offset: Label("L2".to_string()) }),
-        ]);
+        let a = make_method(
+            "foo",
+            "()V",
+            vec![SmaliOp::Op(DexOp::Goto {
+                offset: Label("L1".to_string()),
+            })],
+        );
+        let b = make_method(
+            "foo",
+            "()V",
+            vec![SmaliOp::Op(DexOp::Goto {
+                offset: Label("L2".to_string()),
+            })],
+        );
         assert!(functions_match(&a, &b));
     }
 
