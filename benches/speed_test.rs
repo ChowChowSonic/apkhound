@@ -1,7 +1,8 @@
 use apkhound::commands::callgraph::handle_callgraph;
 use apkhound::commands::compare::handle_compare;
 use apkhound::commands::match_cmd::{MatchConfig, handle_match};
-use criterion::{Criterion, black_box, criterion_group, criterion_main};
+use criterion::{Criterion, criterion_group, criterion_main};
+use std::hint::black_box;
 use std::path::PathBuf;
 
 fn bench_run_match(c: &mut Criterion) {
