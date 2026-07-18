@@ -30,7 +30,7 @@ fn binary_path() -> PathBuf {
 
 #[test]
 fn test_manifest_printed() {
-    let apk = apk_path("co.kitetech.filemanager.apk");
+    let apk = apk_path("org.videolan.vlc_3.7.1.apk");
     if apk.is_none() {
         eprintln!("skipping test_manifest_printed: APK not found");
         return;
@@ -44,12 +44,12 @@ fn test_manifest_printed() {
     assert!(output.status.success());
     let stdout = String::from_utf8_lossy(&output.stdout);
     assert!(stdout.contains("ANDROID MANIFEST"));
-    assert!(stdout.contains("co.kitetech.filemanager"));
+    assert!(stdout.contains("org.videolan.vlc"));
 }
 
 #[test]
 fn test_manifest_json() {
-    let apk = apk_path("co.kitetech.filemanager.apk");
+    let apk = apk_path("org.videolan.vlc_3.7.1.apk");
     if apk.is_none() {
         eprintln!("skipping test_manifest_json: APK not found");
         return;
@@ -63,12 +63,12 @@ fn test_manifest_json() {
     assert!(output.status.success());
     let stdout = String::from_utf8_lossy(&output.stdout);
     assert!(stdout.contains("\"package_name\""));
-    assert!(stdout.contains("co.kitetech.filemanager"));
+    assert!(stdout.contains("org.videolan.vlc"));
 }
 
 #[test]
 fn test_permissions_single_apk() {
-    let apk = apk_path("co.kitetech.filemanager.apk");
+    let apk = apk_path("org.videolan.vlc_3.7.1.apk");
     if apk.is_none() {
         eprintln!("skipping test_permissions_single_apk: APK not found");
         return;
@@ -85,8 +85,8 @@ fn test_permissions_single_apk() {
 
 #[test]
 fn test_permissions_diff() {
-    let old = apk_path("co.kitetech.filemanager_old.apk");
-    let new = apk_path("co.kitetech.filemanager.apk");
+    let old = apk_path("org.videolan.vlc_3.5.4.apk");
+    let new = apk_path("org.videolan.vlc_3.7.1.apk");
     if old.is_none() || new.is_none() {
         eprintln!("skipping test_permissions_diff: APK files not found");
         return;
@@ -102,8 +102,8 @@ fn test_permissions_diff() {
 
 #[test]
 fn test_compare() {
-    let old = apk_path("co.kitetech.filemanager_old.apk");
-    let new = apk_path("co.kitetech.filemanager.apk");
+    let old = apk_path("org.videolan.vlc_3.5.4.apk");
+    let new = apk_path("org.videolan.vlc_3.7.1.apk");
     if old.is_none() || new.is_none() {
         eprintln!("skipping test_compare: APK files not found");
         return;
@@ -123,8 +123,8 @@ fn test_compare() {
 
 #[test]
 fn test_compare_with_filter() {
-    let old = apk_path("co.kitetech.filemanager_old.apk");
-    let new = apk_path("co.kitetech.filemanager.apk");
+    let old = apk_path("org.videolan.vlc_3.5.4.apk");
+    let new = apk_path("org.videolan.vlc_3.7.1.apk");
     if old.is_none() || new.is_none() {
         eprintln!("skipping test_compare_with_filter: APK files not found");
         return;
@@ -142,8 +142,8 @@ fn test_compare_with_filter() {
 
 #[test]
 fn test_match() {
-    let old = apk_path("co.kitetech.filemanager_old.apk");
-    let new = apk_path("co.kitetech.filemanager.apk");
+    let old = apk_path("org.videolan.vlc_3.5.4.apk");
+    let new = apk_path("org.videolan.vlc_3.7.1.apk");
     if old.is_none() || new.is_none() {
         eprintln!("skipping test_match: APK files not found");
         return;
@@ -169,8 +169,8 @@ fn test_match() {
 
 #[test]
 fn test_match_csv() {
-    let old = apk_path("co.kitetech.filemanager_old.apk");
-    let new = apk_path("co.kitetech.filemanager.apk");
+    let old = apk_path("org.videolan.vlc_3.5.4.apk");
+    let new = apk_path("org.videolan.vlc_3.7.1.apk");
     if old.is_none() || new.is_none() {
         eprintln!("skipping test_match_csv: APK files not found");
         return;
@@ -189,7 +189,7 @@ fn test_match_csv() {
 
 #[test]
 fn test_callgraph() {
-    let apk = apk_path("co.kitetech.filemanager.apk");
+    let apk = apk_path("org.videolan.vlc_3.7.1.apk");
     if apk.is_none() {
         eprintln!("skipping test_callgraph: APK not found");
         return;
@@ -209,8 +209,8 @@ fn test_callgraph() {
 
 #[test]
 fn test_extract() {
-    let old = apk_path("co.kitetech.filemanager_old.apk");
-    let new = apk_path("co.kitetech.filemanager.apk");
+    let old = apk_path("org.videolan.vlc_3.5.4.apk");
+    let new = apk_path("org.videolan.vlc_3.7.1.apk");
     if old.is_none() || new.is_none() {
         eprintln!("skipping test_extract: APK files not found");
         return;

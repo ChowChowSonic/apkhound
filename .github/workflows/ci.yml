@@ -60,11 +60,14 @@ jobs:
       - uses: actions-rust-lang/setup-rust-toolchain@v1
         with:
           toolchain: stable
-      - name: Download test APK
+      - name: Install apkeep
+        run: cargo install apkeep
+      - name: Download test APKs
         run: |
-          curl -sL -o co.kitetech.filemanager.apk \
-            "https://github.com/joeyajames/apkhound/releases/download/v0.1.0/co.kitetech.filemanager.apk" || \
-          echo "Warning: could not download test APK; integration tests will be skipped"
+          apkeep -a 'org.videolan.vlc@3.5.4' .
+          mv org.videolan.vlc@3.5.4.apk org.videolan.vlc_3.5.4.apk
+          apkeep -a 'org.videolan.vlc@3.7.1' .
+          mv org.videolan.vlc@3.7.1.apk org.videolan.vlc_3.7.1.apk
       - name: Run integration tests
         run: cargo test --test integration_test
 
