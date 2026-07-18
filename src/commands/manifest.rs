@@ -24,24 +24,26 @@ pub enum Format {
 
 /// Extract the `AndroidManifest.xml` from an APK and print it in the
 /// requested `format`.
-pub fn handle_manifest(apk_path: PathBuf, format: Format) -> Result<(), ()> {
+pub fn handle_manifest(apk_path: PathBuf, format: Format) -> Result<(), &'static str> {
     let apk_res = ApkFile::from_file(apk_path);
     if let Ok(apk) = apk_res {
         let manifest_res = extract_manifest(&apk);
         if let Ok(manifest) = manifest_res {
             match format {
                 Format::Xml => {
-                    let xml = manifest.to_string().map_err(|_| ())?;
+                    let xml = manifest
+                        .to_string()
+                        .map_err(|_| "failed to read manifest")?;
                     println!("{}", xml);
                 }
                 Format::Json => {
                     let summary = ManifestSummary::from(&manifest);
-                    let json = summary.to_json().map_err(|_| ())?;
+                    let json = summary.to_json().map_err(|_| "failed to read manifest")?;
                     println!("{}", json);
                 }
                 Format::Yaml => {
                     let summary = ManifestSummary::from(&manifest);
-                    let yaml = summary.to_yaml().map_err(|_| ())?;
+                    let yaml = summary.to_yaml().map_err(|_| "failed to read manifest")?;
                     println!("{}", yaml);
                 }
                 Format::Printed => {
@@ -52,13 +54,13 @@ pub fn handle_manifest(apk_path: PathBuf, format: Format) -> Result<(), ()> {
             Ok(())
         } else if let Err(e) = manifest_res {
             error!("Unable to extract app manifest due to reason: {e}");
-            Err(())
+            Err("Unable to extract app manifest due to reason: {e}")
         } else {
             Ok(())
         }
     } else if let Err(app) = apk_res {
         error!("Unable to open APK file due to reason: {app}");
-        Err(())
+        Err("Unable to open APK file due to reason: {app}")
     } else {
         Ok(())
     }

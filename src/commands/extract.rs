@@ -20,7 +20,7 @@ pub fn handle_extract(
     output_dir: PathBuf,
     class_filters: Vec<String>,
     smali_filters: Vec<String>,
-) -> Result<(), ()> {
+) -> Result<(), &'static str> {
     let apks: Vec<Result<ApkFile, _>> = vec![old_apk, new_apk]
         .par_iter()
         .map(ApkFile::from_file)
@@ -63,11 +63,11 @@ pub fn handle_extract(
         Ok(())
     } else if let Err(old) = &apks[0] {
         error!("Error parsing old apk: {old}");
-        Err(())
+        Err("Error parsing old apk: {old}")
     } else if let Err(new) = &apks[1] {
         error!("Error parsing new apk: {new}");
-        Err(())
+        Err("Error parsing new apk: {new}")
     } else {
-        Err(())
+        unreachable!("I have no idea how we got here, but new and old are neither Err() nor Ok()")
     }
 }
