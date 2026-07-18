@@ -1,3 +1,6 @@
+//! Structured representation of `AndroidManifest.xml` with support for
+//! JSON, YAML, and human-readable text output.
+
 use serde::Serialize;
 use smali::android::binary_xml::{AndroidManifest, ManifestElement, ManifestValue};
 
@@ -38,6 +41,7 @@ fn first_child_by_tag<'a>(
     element.children.iter().find(|c| c.tag == tag)
 }
 
+/// Top-level summary of the Android manifest.
 #[derive(Serialize)]
 #[serde(rename_all = "snake_case")]
 pub struct ManifestSummary {
@@ -57,6 +61,7 @@ pub struct ManifestSummary {
     pub supports_screens: Option<SupportsScreensInfo>,
 }
 
+/// SDK version information from `<uses-sdk>`.
 #[derive(Serialize)]
 #[serde(rename_all = "snake_case")]
 pub struct SdkInfo {
@@ -65,6 +70,7 @@ pub struct SdkInfo {
     pub max_sdk_version: Option<String>,
 }
 
+/// A `<permission>` declaration in the manifest.
 #[derive(Serialize)]
 #[serde(rename_all = "snake_case")]
 pub struct PermissionDecl {
@@ -75,6 +81,8 @@ pub struct PermissionDecl {
     pub permission_group: Option<String>,
 }
 
+/// A `<uses-feature>` element describing a hardware or software feature
+/// required by the app.
 #[derive(Serialize)]
 #[serde(rename_all = "snake_case")]
 pub struct FeatureInfo {
@@ -83,6 +91,7 @@ pub struct FeatureInfo {
     pub required: Option<bool>,
 }
 
+/// Summary of the `<application>` block, including components.
 #[derive(Serialize)]
 #[serde(rename_all = "snake_case")]
 pub struct ApplicationSummary {
@@ -106,6 +115,7 @@ pub struct ApplicationSummary {
     pub meta_data: Vec<MetaDataInfo>,
 }
 
+/// An Android component (activity, service, or receiver).
 #[derive(Serialize)]
 #[serde(rename_all = "snake_case")]
 pub struct ComponentInfo {
@@ -131,6 +141,7 @@ pub struct ComponentInfo {
     pub window_soft_input_mode: Option<String>,
 }
 
+/// A `<provider>` component definition.
 #[derive(Serialize)]
 #[serde(rename_all = "snake_case")]
 pub struct ProviderInfo {
@@ -147,6 +158,7 @@ pub struct ProviderInfo {
     pub intent_filters: Vec<IntentFilterInfo>,
 }
 
+/// An `<intent-filter>` with actions, categories, and data specs.
 #[derive(Serialize)]
 #[serde(rename_all = "snake_case")]
 pub struct IntentFilterInfo {
@@ -155,6 +167,7 @@ pub struct IntentFilterInfo {
     pub data: Vec<DataInfo>,
 }
 
+/// A `<data>` element inside an intent filter.
 #[derive(Serialize)]
 #[serde(rename_all = "snake_case")]
 pub struct DataInfo {
@@ -167,6 +180,7 @@ pub struct DataInfo {
     pub mime_type: Option<String>,
 }
 
+/// A `<uses-library>` element.
 #[derive(Serialize)]
 #[serde(rename_all = "snake_case")]
 pub struct LibraryInfo {
@@ -174,6 +188,7 @@ pub struct LibraryInfo {
     pub required: Option<bool>,
 }
 
+/// A `<meta-data>` key-value pair.
 #[derive(Serialize)]
 #[serde(rename_all = "snake_case")]
 pub struct MetaDataInfo {
@@ -182,6 +197,7 @@ pub struct MetaDataInfo {
     pub resource: Option<String>,
 }
 
+/// An `<instrumentation>` definition.
 #[derive(Serialize)]
 #[serde(rename_all = "snake_case")]
 pub struct InstrumentationInfo {
@@ -192,6 +208,8 @@ pub struct InstrumentationInfo {
     pub functional_test: Option<bool>,
 }
 
+/// The `<supports-screens>` element describing which screen sizes the app
+/// supports.
 #[derive(Serialize)]
 #[serde(rename_all = "snake_case")]
 pub struct SupportsScreensInfo {
@@ -459,14 +477,17 @@ impl From<&AndroidManifest> for ManifestSummary {
 }
 
 impl ManifestSummary {
+    /// Serialize the manifest summary as pretty-printed JSON.
     pub fn to_json(&self) -> serde_json::Result<String> {
         serde_json::to_string_pretty(self)
     }
 
+    /// Serialize the manifest summary as YAML.
     pub fn to_yaml(&self) -> serde_yaml::Result<String> {
         serde_yaml::to_string(self)
     }
 
+    /// Format the manifest as a human-readable text report.
     pub fn to_printed(&self) -> String {
         let mut out = String::new();
 

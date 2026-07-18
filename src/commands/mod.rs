@@ -1,3 +1,5 @@
+//! Command handler modules — each handles one CLI subcommand.
+
 pub mod callgraph;
 pub mod compare;
 pub mod extract;

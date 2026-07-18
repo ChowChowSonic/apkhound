@@ -1,3 +1,6 @@
+//! Handler for the `match` subcommand — runs WL graph-kernel matching
+//! between packages in two APKs and displays a results table or CSV.
+
 use crate::compare::unpack_apk_classes;
 use crate::matching::{MatchResult, pkg_display, run_match};
 use crate::utils::build_regex;
@@ -7,6 +10,9 @@ use smali::android::zip::ApkFile;
 use std::path::PathBuf;
 use tracing::error;
 
+/// Run package matching between two APKs and output the results as either a
+/// formatted table or CSV.  When `show_details` is set, per-package method
+/// counts and match scores are also printed.
 pub fn handle_match(
     old_apk: PathBuf,
     new_apk: PathBuf,

@@ -1,3 +1,6 @@
+//! Handler for the `permissions` subcommand — lists or diffs Android
+//! manifest permissions between APKs.
+
 use crate::utils::{compare_manifest_permissions, extract_manifest};
 use rayon::iter::{IntoParallelRefIterator, ParallelIterator};
 use smali::android::binary_xml::AndroidManifest;
@@ -5,6 +8,9 @@ use smali::android::zip::ApkFile;
 use std::path::PathBuf;
 use tracing::error;
 
+/// If `new_apk` is provided, diff the permissions between both APKs and
+/// print added / deleted permissions.  Otherwise print every
+/// `uses-permission` from the single APK.
 pub fn handle_permissions(old_apk: PathBuf, new_apk: Option<PathBuf>) {
     if let Some(new_res) = new_apk {
         let apks: Vec<Result<ApkFile, _>> = vec![old_apk, new_res]

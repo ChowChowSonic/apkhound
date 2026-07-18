@@ -1,14 +1,10 @@
-mod callgraph;
-mod compare;
-mod manifest_summary;
-mod matching;
-
-mod utils;
-
-mod commands;
-
+use apkhound::commands;
 use clap::Parser;
 use std::path::PathBuf;
+
+//#[global_allocator]
+//static GLOBAL: tikv_jemallocator::Jemalloc = tikv_jemallocator::Jemalloc;
+//static GLOBAL: mimalloc::MiMalloc = mimalloc::MiMalloc;
 
 #[derive(Parser, Debug)]
 #[command(version, about, long_about = None)]
@@ -72,10 +68,12 @@ enum Commands {
         #[arg(short = 'f', long = "filterclass")]
         filters: Vec<String>,
     },
+    /// Compare manifest permissions between two APKs, or list permissions of one
     Permissions {
         old_apk: PathBuf,
         new_apk: Option<PathBuf>,
     },
+    /// Extract and display AndroidManifest in a choice of formats
     Manifest {
         apk_path: PathBuf,
         #[arg(value_enum, default_value_t = commands::manifest::Format::Printed)]
@@ -103,7 +101,13 @@ fn main() {
             output_dir,
             class_filters,
             smali_filters,
-        } => commands::extract::handle_extract(old_apk, new_apk, output_dir, class_filters, smali_filters),
+        } => commands::extract::handle_extract(
+            old_apk,
+            new_apk,
+            output_dir,
+            class_filters,
+            smali_filters,
+        ),
         Commands::Match {
             old_apk,
             new_apk,
