@@ -5,7 +5,7 @@ use crate::callgraph::iterate_over_dex_files;
 use crate::utils::build_regex;
 use rayon::iter::{IntoParallelRefIterator, ParallelIterator};
 use regex::Regex;
-use rustc_hash::{FxHashMap, FxHasher};
+use rustc_hash::FxHashMap;
 use smali::android::zip::ApkFile;
 use std::io::{BufWriter, Write};
 use std::path::PathBuf;

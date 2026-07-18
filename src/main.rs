@@ -120,12 +120,14 @@ fn main() {
         } => commands::match_cmd::handle_match(
             old_apk,
             new_apk,
-            threshold,
-            change_threshold,
-            wl_iterations,
-            csv,
-            show_details,
-            filters,
+            commands::match_cmd::MatchConfig {
+                threshold,
+                change_threshold,
+                wl_iterations,
+                csv,
+                show_details,
+                filters,
+            },
         ),
         Commands::Permissions { old_apk, new_apk } => {
             commands::permissions::handle_permissions(old_apk, new_apk)

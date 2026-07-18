@@ -10,18 +10,23 @@ use smali::android::zip::ApkFile;
 use std::path::PathBuf;
 use tracing::error;
 
+#[derive(Clone)]
+pub struct MatchConfig {
+    pub threshold: f64,
+    pub change_threshold: f64,
+    pub wl_iterations: usize,
+    pub csv: bool,
+    pub show_details: bool,
+    pub filters: Vec<String>,
+}
+
 /// Run package matching between two APKs and output the results as either a
 /// formatted table or CSV.  When `show_details` is set, per-package method
 /// counts and match scores are also printed.
 pub fn handle_match(
     old_apk: PathBuf,
     new_apk: PathBuf,
-    threshold: f64,
-    change_threshold: f64,
-    wl_iterations: usize,
-    csv: bool,
-    show_details: bool,
-    filters: Vec<String>,
+    cfg: MatchConfig,
 ) {
     let apks: Vec<Result<ApkFile, _>> = vec![old_apk, new_apk]
         .par_iter()
@@ -30,7 +35,7 @@ pub fn handle_match(
     if let Ok(new) = &apks[1]
         && let Ok(old) = &apks[0]
     {
-        let regex: Vec<Regex> = build_regex(&filters);
+        let regex: Vec<Regex> = build_regex(&cfg.filters);
         let old_classes = unpack_apk_classes(old, &regex);
         let new_classes = unpack_apk_classes(new, &regex);
 
@@ -41,12 +46,12 @@ pub fn handle_match(
         } = run_match(
             &old_classes,
             &new_classes,
-            threshold,
-            change_threshold,
-            wl_iterations,
+            cfg.threshold,
+            cfg.change_threshold,
+            cfg.wl_iterations,
         );
 
-        if csv {
+        if cfg.csv {
             println!("old_package,new_package,score,status");
             for (old_name, new_name, score, status) in &results {
                 let score_str = if *score <= 0.0 {
@@ -141,7 +146,7 @@ pub fn handle_match(
                 );
             }
 
-            if show_details {
+            if cfg.show_details {
                 println!();
                 for (old_name, new_name, score, status) in &results {
                     let score_str = if *score <= 0.0 {

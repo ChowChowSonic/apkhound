@@ -15,6 +15,12 @@ use smali::types::{SmaliClass, SmaliMethod, SmaliOp};
 pub type Histogram = FxHashMap<u64, usize>;
 type SigsMap = FxHashMap<String, Vec<Histogram>>;
 
+pub struct SideData<'a> {
+    pub sigs: &'a SigsMap,
+    pub names: &'a [String],
+    pub no_graph: &'a [String],
+}
+
 /// A directed call graph for a single package.
 /// Each node corresponds to a method; edges represent internal calls.
 #[derive(Clone)]
@@ -438,26 +444,23 @@ fn compute_sigs_and_names(
 /// `REMOVED`, or `NEW` depending on `match_threshold` and
 /// `change_threshold`.
 pub fn match_packages(
-    old_sigs: &SigsMap,
-    new_sigs: &SigsMap,
-    old_names: &[String],
-    new_names: &[String],
+    old: SideData,
+    new: SideData,
     match_threshold: f64,
     change_threshold: f64,
-    old_no_graph: &[String],
-    new_no_graph: &[String],
 ) -> Vec<(String, String, f64, String)> {
     let mut results: Vec<(String, String, f64, String)> = Vec::new();
     let mut used_new: FxHashSet<usize> = FxHashSet::default();
-    let mut old_best: Vec<(usize, i32, f64)> = old_names
+    let mut old_best: Vec<(usize, i32, f64)> = old
+        .names
         .par_iter()
         .enumerate()
         .map(|(i, on)| {
-            let hi_a = &old_sigs[on];
+            let hi_a = &old.sigs[on];
             let mut best_j = -1i32;
             let mut best_s = 0.0f64;
-            for (j, nn) in new_names.iter().enumerate() {
-                let s = wl_similarity(hi_a, &new_sigs[nn]);
+            for (j, nn) in new.names.iter().enumerate() {
+                let s = wl_similarity(hi_a, &new.sigs[nn]);
                 if s > best_s {
                     best_s = s;
                     best_j = j as i32;
@@ -472,16 +475,16 @@ pub fn match_packages(
     for &(i, best_j, best_s) in &old_best {
         if best_j >= 0 && !used_new.contains(&(best_j as usize)) && best_s >= change_threshold {
             used_new.insert(best_j as usize);
-            let nn = new_names[best_j as usize].clone();
+            let nn = new.names[best_j as usize].clone();
             let status = if best_s >= match_threshold {
                 "MATCH"
             } else {
                 "CHANGED"
             };
-            results.push((old_names[i].clone(), nn, best_s, status.to_string()));
+            results.push((old.names[i].clone(), nn, best_s, status.to_string()));
         } else {
             results.push((
-                old_names[i].clone(),
+                old.names[i].clone(),
                 "---".to_string(),
                 0.0,
                 "REMOVED".to_string(),
@@ -489,18 +492,18 @@ pub fn match_packages(
         }
     }
 
-    for (j, nn) in new_names.iter().enumerate() {
+    for (j, nn) in new.names.iter().enumerate() {
         if !used_new.contains(&j) {
             results.push(("---".to_string(), nn.clone(), 0.0, "NEW".to_string()));
         }
     }
 
-    for name in old_no_graph {
+    for name in old.no_graph {
         if !results.iter().any(|r| &r.0 == name) {
             results.push((name.clone(), "---".to_string(), 0.0, "REMOVED".to_string()));
         }
     }
-    for name in new_no_graph {
+    for name in new.no_graph {
         if !results.iter().any(|r| &r.1 == name) {
             results.push(("---".to_string(), name.clone(), 0.0, "NEW".to_string()));
         }
@@ -523,14 +526,10 @@ pub fn run_match(
     let (old_sigs, new_sigs, old_names, new_names, old_no_graph, new_no_graph) =
         compute_sigs_and_names(&old_data, &new_data, wl_iterations);
     let results = match_packages(
-        &old_sigs,
-        &new_sigs,
-        &old_names,
-        &new_names,
+        SideData { sigs: &old_sigs, names: &old_names, no_graph: &old_no_graph },
+        SideData { sigs: &new_sigs, names: &new_names, no_graph: &new_no_graph },
         match_threshold,
         change_threshold,
-        &old_no_graph,
-        &new_no_graph,
     );
     MatchResult {
         results,
@@ -872,14 +871,10 @@ mod tests {
         let old_names = vec!["pkgA".to_string()];
         let new_names = vec!["pkgA".to_string()];
         let results = match_packages(
-            &old_sigs,
-            &new_sigs,
-            &old_names,
-            &new_names,
+            SideData { sigs: &old_sigs, names: &old_names, no_graph: &[] },
+            SideData { sigs: &new_sigs, names: &new_names, no_graph: &[] },
             0.8,
             0.0,
-            &[],
-            &[],
         );
         assert_eq!(results.len(), 1);
         assert_eq!(results[0].0, "pkgA");
@@ -896,14 +891,10 @@ mod tests {
         let old_names = vec!["pkgOld".to_string()];
         let new_names: Vec<String> = vec![];
         let results = match_packages(
-            &old_sigs,
-            &new_sigs,
-            &old_names,
-            &new_names,
+            SideData { sigs: &old_sigs, names: &old_names, no_graph: &[] },
+            SideData { sigs: &new_sigs, names: &new_names, no_graph: &[] },
             0.8,
             0.0,
-            &[],
-            &[],
         );
         assert_eq!(results.len(), 1);
         assert_eq!(results[0].3, "REMOVED");
@@ -918,14 +909,10 @@ mod tests {
         let old_names: Vec<String> = vec![];
         let new_names = vec!["pkgNew".to_string()];
         let results = match_packages(
-            &old_sigs,
-            &new_sigs,
-            &old_names,
-            &new_names,
+            SideData { sigs: &old_sigs, names: &old_names, no_graph: &[] },
+            SideData { sigs: &new_sigs, names: &new_names, no_graph: &[] },
             0.8,
             0.0,
-            &[],
-            &[],
         );
         assert_eq!(results.len(), 1);
         assert_eq!(results[0].3, "NEW");
@@ -934,14 +921,10 @@ mod tests {
     #[test]
     fn test_match_packages_no_graph() {
         let results = match_packages(
-            &FxHashMap::default(),
-            &FxHashMap::default(),
-            &[],
-            &[],
+            SideData { sigs: &FxHashMap::default(), names: &[], no_graph: &["pkgEmpty".to_string()] },
+            SideData { sigs: &FxHashMap::default(), names: &[], no_graph: &[] },
             0.8,
             0.0,
-            &["pkgEmpty".to_string()],
-            &[],
         );
         assert!(
             results

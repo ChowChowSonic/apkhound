@@ -1,18 +1,20 @@
 use apkhound::commands::callgraph::handle_callgraph;
 use apkhound::commands::compare::handle_compare;
-use apkhound::commands::match_cmd::handle_match;
+use apkhound::commands::match_cmd::{handle_match, MatchConfig};
 use criterion::{Criterion, black_box, criterion_group, criterion_main};
 use std::path::PathBuf;
 
 fn bench_run_match(c: &mut Criterion) {
     let old_apk = PathBuf::from("./co.kitetech.filemanager_old.apk");
     let new_apk = PathBuf::from("./co.kitetech.filemanager.apk");
-    let threshold = 0.9;
-    let change_threshold = 0.75;
-    let wl_iterations = 3;
-    let csv = false;
-    let show_details = false;
-    let filters: Vec<String> = vec![];
+    let cfg = MatchConfig {
+        threshold: 0.9,
+        change_threshold: 0.75,
+        wl_iterations: 3,
+        csv: false,
+        show_details: false,
+        filters: vec![],
+    };
 
     let mut group = c.benchmark_group("run_match");
     group.sample_size(1000);
@@ -21,12 +23,7 @@ fn bench_run_match(c: &mut Criterion) {
             handle_match(
                 black_box(old_apk.clone()),
                 black_box(new_apk.clone()),
-                black_box(threshold),
-                black_box(change_threshold),
-                black_box(wl_iterations),
-                black_box(csv),
-                black_box(show_details),
-                black_box(filters.clone()),
+                black_box(cfg.clone()),
             )
         });
     });
