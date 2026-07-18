@@ -14,7 +14,7 @@ use tracing::error;
 /// Run the call-graph extraction across the given APK paths and print a
 /// DOT digraph to stdout.  Optional `filters` restrict which classes are
 /// included.
-pub fn handle_callgraph(apk_path: Vec<PathBuf>, filters: Vec<String>) {
+pub fn handle_callgraph(apk_path: Vec<PathBuf>, filters: Vec<String>) -> Result<(), ()> {
     let regex: Vec<Regex> = build_regex(&filters);
 
     let apk_results: Vec<Result<ApkFile, _>> =
@@ -65,4 +65,10 @@ pub fn handle_callgraph(apk_path: Vec<PathBuf>, filters: Vec<String>) {
         }
     }
     let _ = writeln!(buf, "}}");
+
+    if apk_results.iter().any(|r| r.is_err()) {
+        Err(())
+    } else {
+        Ok(())
+    }
 }

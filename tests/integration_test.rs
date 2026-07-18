@@ -1,9 +1,23 @@
+use std::path::Path;
 use std::path::PathBuf;
 use std::process::Command;
 
 fn apk_path(name: &str) -> Option<PathBuf> {
     let p = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join(name);
-    if p.exists() { Some(p) } else { None }
+    (p.exists() && is_valid_apk(&p)).then_some(p)
+}
+
+fn is_valid_apk(path: &Path) -> bool {
+    use std::io::Read;
+    let mut f = match std::fs::File::open(path) {
+        Ok(f) => f,
+        Err(_) => return false,
+    };
+    let mut magic = [0u8; 4];
+    if f.read_exact(&mut magic).is_err() {
+        return false;
+    }
+    magic == [0x50, 0x4B, 0x03, 0x04]
 }
 
 fn binary_path() -> PathBuf {

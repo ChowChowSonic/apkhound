@@ -11,7 +11,10 @@ use tracing::error;
 /// If `new_apk` is provided, diff the permissions between both APKs and
 /// print added / deleted permissions.  Otherwise print every
 /// `uses-permission` from the single APK.
-pub fn handle_permissions(old_apk: PathBuf, new_apk: Option<PathBuf>) {
+pub fn handle_permissions(
+    old_apk: PathBuf,
+    new_apk: Option<PathBuf>,
+) -> Result<(), ()> {
     if let Some(new_res) = new_apk {
         let apks: Vec<Result<ApkFile, _>> = vec![old_apk, new_res]
             .par_iter()
@@ -28,11 +31,16 @@ pub fn handle_permissions(old_apk: PathBuf, new_apk: Option<PathBuf>) {
             for x in added {
                 println!("ADDED: {x}");
             }
-        } else if let Err(old) = &apks[0] {
-            error!("Unable to parse old APK due to reason: {old}");
-        } else if let Err(new) = &apks[1] {
-            error!("Unable to parse new APK due to reason: {new}");
-        };
+            Ok(())
+        } else {
+            if let Err(old) = &apks[0] {
+                error!("Unable to parse old APK due to reason: {old}");
+            }
+            if let Err(new) = &apks[1] {
+                error!("Unable to parse new APK due to reason: {new}");
+            }
+            Err(())
+        }
     } else if let Ok(apk) = ApkFile::from_file(old_apk) {
         let manifest: AndroidManifest =
             extract_manifest(&apk).expect("Error when trying to retrieve android manifest");
@@ -41,5 +49,8 @@ pub fn handle_permissions(old_apk: PathBuf, new_apk: Option<PathBuf>) {
                 println!("{y:?}");
             }
         }
+        Ok(())
+    } else {
+        Err(())
     }
 }

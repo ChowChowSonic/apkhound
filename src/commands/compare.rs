@@ -14,7 +14,11 @@ use tracing::error;
 /// Compare the classes in `old_apk` and `new_apk` and print any additions,
 /// removals, or changes found.  An optional list of regex `filters` can
 /// restrict which classes are examined.
-pub fn handle_compare(old_apk: PathBuf, new_apk: PathBuf, filters: Vec<String>) {
+pub fn handle_compare(
+    old_apk: PathBuf,
+    new_apk: PathBuf,
+    filters: Vec<String>,
+) -> Result<(), ()> {
     let apks: Vec<Result<ApkFile, _>> = vec![old_apk, new_apk]
         .par_iter()
         .map(ApkFile::from_file)
@@ -57,9 +61,14 @@ pub fn handle_compare(old_apk: PathBuf, new_apk: PathBuf, filters: Vec<String>) 
                 EditType::Remove(x) => println!("REMOVED: {x}"),
             }
         }
+        Ok(())
     } else if let Err(old) = &apks[0] {
         error!("Error parsing old apk: {old}");
+        Err(())
     } else if let Err(new) = &apks[1] {
         error!("Error parsing new apk: {new}");
+        Err(())
+    } else {
+        Err(())
     }
 }

@@ -23,7 +23,7 @@ pub struct MatchConfig {
 /// Run package matching between two APKs and output the results as either a
 /// formatted table or CSV.  When `show_details` is set, per-package method
 /// counts and match scores are also printed.
-pub fn handle_match(old_apk: PathBuf, new_apk: PathBuf, cfg: MatchConfig) {
+pub fn handle_match(old_apk: PathBuf, new_apk: PathBuf, cfg: MatchConfig) -> Result<(), ()> {
     let apks: Vec<Result<ApkFile, _>> = vec![old_apk, new_apk]
         .par_iter()
         .map(ApkFile::from_file)
@@ -173,9 +173,14 @@ pub fn handle_match(old_apk: PathBuf, new_apk: PathBuf, cfg: MatchConfig) {
                 }
             }
         }
+        Ok(())
     } else if let Err(old) = &apks[0] {
         error!("Error parsing old apk: {old}");
+        Err(())
     } else if let Err(new) = &apks[1] {
         error!("Error parsing new apk: {new}");
+        Err(())
+    } else {
+        Err(())
     }
 }

@@ -81,7 +81,7 @@ enum Commands {
     },
 }
 
-fn main() {
+fn main() -> Result<(), ()> {
     tracing_subscriber::fmt()
         .with_writer(std::io::stderr)
         .init();
