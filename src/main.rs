@@ -86,32 +86,28 @@ fn main() {
         .with_writer(std::io::stderr)
         .init();
     let args = Commands::parse();
-    match args {
+    let result = match args {
         Commands::Callgraph { apk_path, filters } => {
-            let _ = commands::callgraph::handle_callgraph(apk_path, filters);
+            commands::callgraph::handle_callgraph(apk_path, filters)
         }
         Commands::Compare {
             old_apk,
             new_apk,
             filters,
-        } => {
-            let _ = commands::compare::handle_compare(old_apk, new_apk, filters);
-        }
+        } => commands::compare::handle_compare(old_apk, new_apk, filters),
         Commands::Extract {
             old_apk,
             new_apk,
             output_dir,
             class_filters,
             smali_filters,
-        } => {
-            let _ = commands::extract::handle_extract(
-                old_apk,
-                new_apk,
-                output_dir,
-                class_filters,
-                smali_filters,
-            );
-        }
+        } => commands::extract::handle_extract(
+            old_apk,
+            new_apk,
+            output_dir,
+            class_filters,
+            smali_filters,
+        ),
         Commands::Match {
             old_apk,
             new_apk,
@@ -121,25 +117,27 @@ fn main() {
             csv,
             show_details,
             filters,
-        } => {
-            let _ = commands::match_cmd::handle_match(
-                old_apk,
-                new_apk,
-                commands::match_cmd::MatchConfig {
-                    threshold,
-                    change_threshold,
-                    wl_iterations,
-                    csv,
-                    show_details,
-                    filters,
-                },
-            );
-        }
+        } => commands::match_cmd::handle_match(
+            old_apk,
+            new_apk,
+            commands::match_cmd::MatchConfig {
+                threshold,
+                change_threshold,
+                wl_iterations,
+                csv,
+                show_details,
+                filters,
+            },
+        ),
         Commands::Permissions { old_apk, new_apk } => {
-            let _ = commands::permissions::handle_permissions(old_apk, new_apk);
+            commands::permissions::handle_permissions(old_apk, new_apk)
         }
         Commands::Manifest { apk_path, format } => {
-            let _ = commands::manifest::handle_manifest(apk_path, format);
+            commands::manifest::handle_manifest(apk_path, format)
         }
+    };
+    if let Err(e) = result {
+        eprintln!("error: {e}");
+        std::process::exit(1);
     }
 }

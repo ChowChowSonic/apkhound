@@ -18,57 +18,57 @@ pub fn handle_compare(
     old_apk: PathBuf,
     new_apk: PathBuf,
     filters: Vec<String>,
-) -> Result<(), &'static str> {
+) -> Result<(), String> {
     let apks: Vec<Result<ApkFile, _>> = vec![old_apk, new_apk]
         .par_iter()
         .map(ApkFile::from_file)
         .collect();
-    if let Ok(new) = &apks[1]
-        && let Ok(old) = &apks[0]
-    {
-        let regex: Vec<Regex> = build_regex(&filters);
-        let old_classes = unpack_apk_classes(old, &regex)
-            .par_iter()
-            .fold(
-                FxHashMap::<String, SmaliClass>::default,
-                |mut accum, item| {
-                    accum.insert(item.name.as_java_type(), item.clone());
+    match (&apks[0], &apks[1]) {
+        (Ok(old), Ok(new)) => {
+            let regex: Vec<Regex> = build_regex(&filters);
+            let old_classes = unpack_apk_classes(old, &regex)
+                .par_iter()
+                .fold(
+                    FxHashMap::<String, SmaliClass>::default,
+                    |mut accum, item| {
+                        accum.insert(item.name.as_java_type(), item.clone());
+                        accum
+                    },
+                )
+                .reduce(FxHashMap::default, |mut accum, mut res| {
+                    accum.extend(res.drain());
                     accum
-                },
-            )
-            .reduce(FxHashMap::default, |mut accum, mut res| {
-                accum.extend(res.drain());
-                accum
-            });
-        let new_classes = unpack_apk_classes(new, &regex)
-            .par_iter()
-            .fold(
-                FxHashMap::<String, SmaliClass>::default,
-                |mut accum, item| {
-                    accum.insert(item.name.as_java_type(), item.clone());
+                });
+            let new_classes = unpack_apk_classes(new, &regex)
+                .par_iter()
+                .fold(
+                    FxHashMap::<String, SmaliClass>::default,
+                    |mut accum, item| {
+                        accum.insert(item.name.as_java_type(), item.clone());
+                        accum
+                    },
+                )
+                .reduce(FxHashMap::default, |mut accum, mut res| {
+                    accum.extend(res.drain());
                     accum
-                },
-            )
-            .reduce(FxHashMap::default, |mut accum, mut res| {
-                accum.extend(res.drain());
-                accum
-            });
-        let res = find_changes_between_classes(new_classes, old_classes);
-        for x in res {
-            match x {
-                EditType::Change(x) => println!("CHANGED: {x}"),
-                EditType::Addition(x) => println!("ADDED: {x}"),
-                EditType::Remove(x) => println!("REMOVED: {x}"),
+                });
+            let res = find_changes_between_classes(new_classes, old_classes);
+            for x in res {
+                match x {
+                    EditType::Change(x) => println!("CHANGED: {x}"),
+                    EditType::Addition(x) => println!("ADDED: {x}"),
+                    EditType::Remove(x) => println!("REMOVED: {x}"),
+                }
             }
+            Ok(())
         }
-        Ok(())
-    } else if let Err(old) = &apks[0] {
-        error!("Error parsing old apk: {old}");
-        Err("Error parsing old apk: {old}")
-    } else if let Err(new) = &apks[1] {
-        error!("Error parsing new apk: {new}");
-        Err("Error parsing new apk: {new}")
-    } else {
-        unreachable!()
+        (Err(old), _) => {
+            error!("Error parsing old apk: {old}");
+            Err(format!("Error parsing old apk: {old}"))
+        }
+        (_, Err(new)) => {
+            error!("Error parsing new apk: {new}");
+            Err(format!("Error parsing new apk: {new}"))
+        }
     }
 }

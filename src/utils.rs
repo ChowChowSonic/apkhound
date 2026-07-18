@@ -50,32 +50,33 @@ pub fn compare_manifest_permissions(old: &ApkFile, new: &ApkFile) -> (Vec<String
     if let Ok(old_doc) = &old_manifest_res
         && let Ok(new_doc) = &new_manifest_res
     {
-        let old_permissions = old_doc.uses_permissions();
-        let new_permissions = new_doc.uses_permissions();
-        let mut old_attributes: Vec<String> = Vec::new();
-        let mut new_attributes: Vec<String> = Vec::new();
-        for (x, a) in old_permissions.iter().zip(&new_permissions) {
-            for y in x.attributes.iter().filter_map(|t| t.raw_value.clone()) {
-                old_attributes.push(y);
-            }
-            for y in a.attributes.iter().filter_map(|t| t.raw_value.clone()) {
-                new_attributes.push(y);
-            }
-        }
-        for (x, y) in old_attributes.iter().zip(&new_attributes) {
+        let old_attributes: Vec<String> = old_doc
+            .uses_permissions()
+            .iter()
+            .flat_map(|x| x.attributes.iter().filter_map(|t| t.raw_value.clone()))
+            .collect();
+        let new_attributes: Vec<String> = new_doc
+            .uses_permissions()
+            .iter()
+            .flat_map(|x| x.attributes.iter().filter_map(|t| t.raw_value.clone()))
+            .collect();
+        for x in &old_attributes {
             if !new_attributes.contains(x) {
-                //println!("PERMISSION REMOVED: {}", x);
-                res.0.push(x.into());
-            }
-            if !old_attributes.contains(y) {
-                //println!("PERMISSION ADDED: {}", y);
-                res.1.push(y.into());
+                res.0.push(x.clone());
             }
         }
-    } else if let Err(old) = old_manifest_res {
-        error!("Error parsing old AndroidManifest: {old}");
-    } else if let Err(new) = new_manifest_res {
-        error!("Error parsing new AndroidManifest: {new}");
+        for y in &new_attributes {
+            if !old_attributes.contains(y) {
+                res.1.push(y.clone());
+            }
+        }
+    } else {
+        if let Err(old) = &old_manifest_res {
+            error!("Error parsing old AndroidManifest: {old}");
+        }
+        if let Err(new) = &new_manifest_res {
+            error!("Error parsing new AndroidManifest: {new}");
+        }
     }
     res
 }

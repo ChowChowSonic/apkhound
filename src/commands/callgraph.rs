@@ -14,13 +14,13 @@ use tracing::error;
 /// Run the call-graph extraction across the given APK paths and print a
 /// DOT digraph to stdout.  Optional `filters` restrict which classes are
 /// included.
-pub fn handle_callgraph(apk_path: Vec<PathBuf>, filters: Vec<String>) -> Result<(), &'static str> {
+pub fn handle_callgraph(apk_path: Vec<PathBuf>, filters: Vec<String>) -> Result<(), String> {
     let regex: Vec<Regex> = build_regex(&filters);
 
     let apk_results: Vec<Result<ApkFile, _>> =
         apk_path.par_iter().map(ApkFile::from_file).collect();
 
-    let entries = apk_results
+    let mut entries = apk_results
         .par_iter()
         .fold(
             FxHashMap::<String, Vec<String>>::default,
@@ -45,17 +45,17 @@ pub fn handle_callgraph(apk_path: Vec<PathBuf>, filters: Vec<String>) -> Result<
         .reduce(
             FxHashMap::<String, Vec<String>>::default,
             |mut total, res| {
-                res.iter().for_each(|(k, v)| {
-                    for y in v {
-                        total.entry(k.to_string()).or_default().push(y.to_string());
-                        let x = &mut total.entry(k.to_string()).or_default();
-                        x.sort();
-                        x.dedup();
-                    }
-                });
+                for (k, v) in &res {
+                    total.entry(k.clone()).or_default().extend(v.iter().cloned());
+                }
                 total
             },
         );
+
+    for val in entries.values_mut() {
+        val.sort();
+        val.dedup();
+    }
 
     let mut buf = BufWriter::new(std::io::stdout().lock());
     let _ = writeln!(buf, "digraph {{");
@@ -67,7 +67,7 @@ pub fn handle_callgraph(apk_path: Vec<PathBuf>, filters: Vec<String>) -> Result<
     let _ = writeln!(buf, "}}");
 
     if apk_results.iter().any(|r| r.is_err()) {
-        Err("An error has occurred when parsing the apk results")
+        Err("An error has occurred when parsing the apk results".to_string())
     } else {
         Ok(())
     }

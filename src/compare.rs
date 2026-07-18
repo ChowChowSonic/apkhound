@@ -130,6 +130,18 @@ pub fn dump_changes_between_classes(
             }
         }
     }
+    for (key, old_class) in &old_classes {
+        if !new_classes.contains_key(key) {
+            let class_dir = key.replace(".", std::path::MAIN_SEPARATOR_STR);
+            let old_dir = old_root.join(&class_dir);
+            for old_method in &old_class.methods {
+                create_dir_all(&old_dir)?;
+                let fname = method_filename(old_method);
+                let mut f = File::create_new(old_dir.join(&fname))?;
+                write!(f, "{}", filtered_smali(old_method))?;
+            }
+        }
+    }
     Ok(())
 }
 /// Compare two sets of classes (keyed by Java type name) and return a list
@@ -175,6 +187,16 @@ pub fn find_changes_between_classes(
                 res.push(EditType::Addition(construct_java_signature(
                     key.clone(),
                     new_method,
+                )));
+            }
+        }
+    }
+    for (key, old_class) in &old_classes {
+        if !new_classes.contains_key(key) {
+            for old_method in &old_class.methods {
+                res.push(EditType::Remove(construct_java_signature(
+                    key.clone(),
+                    old_method,
                 )));
             }
         }
