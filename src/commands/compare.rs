@@ -1,13 +1,19 @@
+//! Handler for the `compare` subcommand — diffs two APKs at the
+//! method-signature level and prints added / removed / changed methods.
+
 use crate::compare::{unpack_apk_classes, find_changes_between_classes, EditType};
 use crate::utils::build_regex;
 use rayon::iter::{IntoParallelRefIterator, ParallelIterator};
 use regex::Regex;
 use smali::android::zip::ApkFile;
 use smali::types::SmaliClass;
-use std::collections::HashMap;
+use rustc_hash::FxHashMap;
 use std::path::PathBuf;
 use tracing::error;
 
+/// Compare the classes in `old_apk` and `new_apk` and print any additions,
+/// removals, or changes found.  An optional list of regex `filters` can
+/// restrict which classes are examined.
 pub fn handle_compare(old_apk: PathBuf, new_apk: PathBuf, filters: Vec<String>) {
     let apks: Vec<Result<ApkFile, _>> = vec![old_apk, new_apk]
         .par_iter()
@@ -19,21 +25,21 @@ pub fn handle_compare(old_apk: PathBuf, new_apk: PathBuf, filters: Vec<String>) 
         let regex: Vec<Regex> = build_regex(&filters);
         let old_classes = unpack_apk_classes(old, &regex)
             .par_iter()
-            .fold(HashMap::<String, SmaliClass>::new, |mut accum, item| {
+            .fold(FxHashMap::<String, SmaliClass>::default, |mut accum, item| {
                 accum.insert(item.name.as_java_type(), item.clone());
                 accum
             })
-            .reduce(HashMap::new, |mut accum, mut res| {
+            .reduce(FxHashMap::default, |mut accum, mut res| {
                 accum.extend(res.drain());
                 accum
             });
         let new_classes = unpack_apk_classes(new, &regex)
             .par_iter()
-            .fold(HashMap::<String, SmaliClass>::new, |mut accum, item| {
+            .fold(FxHashMap::<String, SmaliClass>::default, |mut accum, item| {
                 accum.insert(item.name.as_java_type(), item.clone());
                 accum
             })
-            .reduce(HashMap::new, |mut accum, mut res| {
+            .reduce(FxHashMap::default, |mut accum, mut res| {
                 accum.extend(res.drain());
                 accum
             });

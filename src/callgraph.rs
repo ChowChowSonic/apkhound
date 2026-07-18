@@ -1,11 +1,15 @@
-use rayon::iter::{IntoParallelIterator, ParallelBridge, ParallelIterator};
+//! Iterate over DEX entries in an APK and build a call graph by extracting
+//! all `Invoke*` opcodes from every method. Output is a
+//! `HashMap<caller_sig, Vec<callee_sig>>`.
+
+use rayon::iter::{IntoParallelRefIterator, ParallelBridge, ParallelIterator};
 use regex::Regex;
+use rustc_hash::FxHashMap;
 use smali::android::zip::is_top_level_dex_name;
 use smali::dex::DexFile;
 use smali::smali_ops::DexOp;
 use smali::types::SmaliMethod;
 use smali::{android::zip::ApkFile, types::SmaliClass, types::SmaliOp};
-use std::collections::HashMap;
 use tracing::error;
 fn jni_class_to_java(jni: &str) -> String {
     jni.strip_prefix('L')
@@ -18,13 +22,13 @@ fn jni_class_to_java(jni: &str) -> String {
 fn iterate_over_function(
     self_method: &SmaliMethod,
     classname: &String,
-    accum: &mut HashMap<String, Vec<String>>,
+    accum: &mut FxHashMap<String, Vec<String>>,
 ) {
     let mut tempres = self_method
         .ops
         .iter()
         .par_bridge()
-        .fold(HashMap::<String, Vec<String>>::new, |mut accum2, op| {
+        .fold(FxHashMap::default, |mut accum2, op| {
             let sig = format!("{}:{}", classname, self_method.name);
             match op {
                 SmaliOp::Op(DexOp::InvokeVirtual { method, .. })
@@ -47,7 +51,7 @@ fn iterate_over_function(
             };
             accum2
         })
-        .reduce(HashMap::new, |mut cumul, mut res| {
+        .reduce(FxHashMap::default, |mut cumul, mut res| {
             for (key, values) in res.drain() {
                 cumul.entry(key).or_default().extend(values);
             }
@@ -61,16 +65,16 @@ fn iterate_over_function(
     accum.extend(tempres.drain());
 }
 
-fn iterate_through_dex_functions(class: &SmaliClass, accum: &mut HashMap<String, Vec<String>>) {
+fn iterate_through_dex_functions(class: &SmaliClass, accum: &mut FxHashMap<String, Vec<String>>) {
     let mut tempres = class
         .methods
         .iter()
         .par_bridge()
-        .fold(HashMap::new, |mut accum2, self_method| {
+        .fold(FxHashMap::default, |mut accum2, self_method| {
             iterate_over_function(self_method, &class.name.as_java_type(), &mut accum2);
             accum2
         })
-        .reduce(HashMap::new, |mut accum3, mut res| {
+        .reduce(FxHashMap::default, |mut accum3, mut res| {
             accum3.extend(res.drain());
             accum3
         });
@@ -80,7 +84,7 @@ fn iterate_through_dex_functions(class: &SmaliClass, accum: &mut HashMap<String,
 fn iterate_through_dex_file(
     dex: DexFile,
     filters: &[Regex],
-    accum: &mut HashMap<String, Vec<String>>,
+    accum: &mut FxHashMap<String, Vec<String>>,
 ) {
     if let Ok(classes) = dex.to_smali() {
         let mut tmpres = classes
@@ -92,11 +96,11 @@ fn iterate_through_dex_file(
                         .any(|reg| reg.is_match(&val.name.as_java_type()))
             })
             .par_bridge()
-            .fold(HashMap::<String, Vec<String>>::new, |mut accum2, class| {
+            .fold(FxHashMap::default, |mut accum2, class| {
                 iterate_through_dex_functions(class, &mut accum2);
                 accum2
             })
-            .reduce(HashMap::<String, Vec<String>>::new, |mut tmp, mut res| {
+            .reduce(FxHashMap::default, |mut tmp, mut res| {
                 tmp.extend(res.drain());
                 tmp
             });
@@ -104,11 +108,16 @@ fn iterate_through_dex_file(
     }
 }
 
-pub fn iterate_over_dex_files(apk: &ApkFile, filters: &[Regex]) -> HashMap<String, Vec<String>> {
-    apk.entry_names().filter(|x| is_top_level_dex_name(x))
-        .par_bridge()
-        .into_par_iter()
-        .fold(HashMap::<String, Vec<String>>::new, |mut accum, x| {
+/// Walk every top-level DEX file inside an APK, parse its classes, and
+/// return a map from caller signature (class:method) to the list of callee
+/// signatures it invokes.  Classes can be filtered by a list of regexes.
+pub fn iterate_over_dex_files(apk: &ApkFile, filters: &[Regex]) -> FxHashMap<String, Vec<String>> {
+    let entry_names: Vec<_> = apk
+        .entry_names()
+        .filter(|x| is_top_level_dex_name(x))
+        .collect();
+    entry_names.par_iter()
+        .fold( FxHashMap::default, |mut accum, x| {
             let entry_res = apk.entry(x);
             if let Some(entry) = entry_res {
                 let dex_result = DexFile::from_bytes(&entry.data);
@@ -120,8 +129,46 @@ pub fn iterate_over_dex_files(apk: &ApkFile, filters: &[Regex]) -> HashMap<Strin
             };
             accum
         })
-        .reduce(HashMap::new, |mut accum, mut res| {
+        .reduce(FxHashMap::default, |mut accum, mut res| {
             accum.extend(res.drain());
             accum
         })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_jni_class_to_java_simple() {
+        assert_eq!(jni_class_to_java("Lcom/example/Test;"), "com.example.Test");
+    }
+
+    #[test]
+    fn test_jni_class_to_java_inner() {
+        assert_eq!(
+            jni_class_to_java("Lcom/example/Outer$Inner;"),
+            "com.example.Outer$Inner"
+        );
+    }
+
+    #[test]
+    fn test_jni_class_to_java_no_leading_l() {
+        assert_eq!(jni_class_to_java("java/lang/String"), "java.lang.String");
+    }
+
+    #[test]
+    fn test_jni_class_to_java_no_semicolon() {
+        // Without ';' the fallback keeps the 'L' prefix
+        assert_eq!(jni_class_to_java("Ljava/lang/Object"), "Ljava.lang.Object");
+    }
+
+    #[test]
+    fn test_jni_class_to_java_array() {
+        // Array prefix '[' prevents 'L' stripping, but ';' is stripped
+        assert_eq!(
+            jni_class_to_java("[Ljava/lang/String;"),
+            "[Ljava.lang.String"
+        );
+    }
 }

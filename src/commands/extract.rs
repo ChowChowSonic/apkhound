@@ -1,13 +1,19 @@
-use crate::compare::{unpack_apk_classes, dump_changes_between_classes};
+//! Handler for the `extract` subcommand — dumps changed method smali to a
+//! directory structure.
+
+use crate::compare::{dump_changes_between_classes, unpack_apk_classes};
 use crate::utils::build_regex;
 use rayon::iter::{IntoParallelRefIterator, ParallelIterator};
 use regex::Regex;
+use rustc_hash::FxHashMap;
 use smali::android::zip::ApkFile;
 use smali::types::SmaliClass;
-use std::collections::HashMap;
 use std::path::PathBuf;
 use tracing::error;
 
+/// Unpack both APKs, diff their classes, and write the smali of every
+/// changed / added / removed method into `output_dir/{old,new}/...`.
+/// Class and smali-line filters can further narrow what is written.
 pub fn handle_extract(
     old_apk: PathBuf,
     new_apk: PathBuf,
@@ -26,24 +32,33 @@ pub fn handle_extract(
         let smali_regex: Vec<Regex> = build_regex(&smali_filters);
         let old_classes = unpack_apk_classes(old, &regex)
             .par_iter()
-            .fold(HashMap::<String, SmaliClass>::new, |mut accum, item| {
-                accum.insert(item.name.as_java_type(), item.clone());
-                accum
-            })
-            .reduce(HashMap::new, |mut accum, mut res| {
+            .fold(
+                FxHashMap::<String, SmaliClass>::default,
+                |mut accum, item| {
+                    accum.insert(item.name.as_java_type(), item.clone());
+                    accum
+                },
+            )
+            .reduce(FxHashMap::default, |mut accum, mut res| {
                 accum.extend(res.drain());
                 accum
             });
         let new_classes = unpack_apk_classes(new, &regex)
             .par_iter()
-            .fold(HashMap::<String, SmaliClass>::new, |mut accum, item| {
-                accum.insert(item.name.as_java_type(), item.clone());
-                accum
-            })
-            .reduce(HashMap::new, |mut accum, mut res| {
-                accum.extend(res.drain());
-                accum
-            });
+            .fold(
+                FxHashMap::<String, SmaliClass>::default,
+                |mut accum, item| {
+                    accum.insert(item.name.as_java_type(), item.clone());
+                    accum
+                },
+            )
+            .reduce(
+                FxHashMap::<String, SmaliClass>::default,
+                |mut accum, mut res| {
+                    accum.extend(res.drain());
+                    accum
+                },
+            );
         let _ = dump_changes_between_classes(new_classes, old_classes, &output_dir, &smali_regex);
     } else if let Err(old) = &apks[0] {
         error!("Error parsing old apk: {old}");

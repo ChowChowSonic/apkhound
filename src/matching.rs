@@ -1,24 +1,39 @@
-use std::collections::HashMap;
+//! Weisfeiler-Lehman graph kernel matching across packages in two APKs.
+//!
+//! Builds a call-graph per package, extracts a 13-dimensional feature
+//! vector per method, runs WL refinement to produce multi-level histogram
+//! signatures, then performs greedy bipartite matching between packages.
+
 use std::hash::{Hash, Hasher};
 
 use rayon::prelude::*;
-use rustc_hash::{FxHashMap, FxHashSet};
+use rustc_hash::{FxHashMap, FxHashSet, FxHasher};
 use smali::smali_ops::DexOp;
 use smali::types::{SmaliClass, SmaliMethod, SmaliOp};
 
+/// A count of how many times each WL label appears at a given iteration.
 pub type Histogram = FxHashMap<u64, usize>;
 type SigsMap = FxHashMap<String, Vec<Histogram>>;
 
+/// A directed call graph for a single package.
+/// Each node corresponds to a method; edges represent internal calls.
 #[derive(Clone)]
 pub struct PackageGraph {
+    /// Adjacency list: for each node, the indices of methods it calls.
     pub adjacency: Vec<Vec<usize>>,
+    /// 13-element feature vectors for each method node.
     pub features: Vec<[i32; 13]>,
 }
 
+/// The output of a matching run.
 pub struct MatchResult {
+    /// Each entry: `(old_package, new_package, similarity_score, status)`.
+    /// Status is one of `MATCH`, `CHANGED`, `REMOVED`, or `NEW`.
     pub results: Vec<(String, String, f64, String)>,
-    pub old_pkg_methods: HashMap<String, usize>,
-    pub new_pkg_methods: HashMap<String, usize>,
+    /// Number of methods per package in the old APK.
+    pub old_pkg_methods: FxHashMap<String, usize>,
+    /// Number of methods per package in the new APK.
+    pub new_pkg_methods: FxHashMap<String, usize>,
 }
 
 const IDX_IN_DEGREE: usize = 0;
@@ -44,6 +59,8 @@ fn get_package_name(jni_class: &str) -> Option<String> {
     }
 }
 
+/// Convert an internal (slash-separated) package name for display, mapping
+/// an empty package to `"(default)"`.
 pub fn pkg_display(pkg: &str) -> String {
     if pkg.is_empty() {
         "(default)".to_string()
@@ -98,10 +115,7 @@ fn is_branch_op(dop: &DexOp) -> bool {
     )
 }
 
-fn extract_method_features(
-    method: &SmaliMethod,
-    package_name: &str,
-) -> ([i32; 13], Vec<String>) {
+fn extract_method_features(method: &SmaliMethod, package_name: &str) -> ([i32; 13], Vec<String>) {
     let mut features = [0i32; 13];
 
     features[IDX_NUM_PARAMS] = method.params.len() as i32;
@@ -130,8 +144,9 @@ fn extract_method_features(
         }
 
         let (invoke_kind, mref_opt) = match dop {
-            DexOp::InvokeVirtual { method, .. }
-            | DexOp::InvokeVirtualRange { method, .. } => ("virtual", Some(method)),
+            DexOp::InvokeVirtual { method, .. } | DexOp::InvokeVirtualRange { method, .. } => {
+                ("virtual", Some(method))
+            }
             DexOp::InvokeSuper { method, .. } | DexOp::InvokeSuperRange { method, .. } => {
                 ("super", Some(method))
             }
@@ -141,8 +156,9 @@ fn extract_method_features(
             DexOp::InvokeStatic { method, .. } | DexOp::InvokeStaticRange { method, .. } => {
                 ("static", Some(method))
             }
-            DexOp::InvokeInterface { method, .. }
-            | DexOp::InvokeInterfaceRange { method, .. } => ("interface", Some(method)),
+            DexOp::InvokeInterface { method, .. } | DexOp::InvokeInterfaceRange { method, .. } => {
+                ("interface", Some(method))
+            }
             DexOp::InvokePolymorphic { method, .. }
             | DexOp::InvokePolymorphicRange { method, .. } => ("polymorphic", Some(method)),
             _ => continue,
@@ -190,13 +206,16 @@ fn extract_method_features(
     (features, internal_calls)
 }
 
+/// Partition a list of `SmaliClass` values by package, build a
+/// `PackageGraph` (call graph + feature vectors) for each non-empty
+/// package, and return the method counts per package.
 pub fn build_package_graphs(
     classes: &[SmaliClass],
 ) -> (
-    HashMap<String, Option<PackageGraph>>,
-    HashMap<String, usize>,
+    FxHashMap<String, Option<PackageGraph>>,
+    FxHashMap<String, usize>,
 ) {
-    let mut pkgs: HashMap<String, Vec<&SmaliClass>> = HashMap::new();
+    let mut pkgs: FxHashMap<String, Vec<&SmaliClass>> = FxHashMap::default();
     for c in classes {
         let jni = c.name.as_jni_type();
         if let Some(pkg) = get_package_name(&jni) {
@@ -204,13 +223,13 @@ pub fn build_package_graphs(
         }
     }
 
-    let mut method_counts: HashMap<String, usize> = HashMap::new();
-    let mut graph_data: HashMap<String, Option<PackageGraph>> = HashMap::new();
+    let mut method_counts: FxHashMap<String, usize> = FxHashMap::default();
+    let mut graph_data: FxHashMap<String, Option<PackageGraph>> = FxHashMap::default();
     for (pkg, cls_list) in &pkgs {
         let total_methods: usize = cls_list.iter().map(|c| c.methods.len()).sum();
         method_counts.insert((*pkg).clone(), total_methods);
 
-        let mut methods: HashMap<String, &SmaliMethod> = HashMap::new();
+        let mut methods: FxHashMap<String, &SmaliMethod> = FxHashMap::default();
         for cls in cls_list {
             let class_jni = cls.name.as_jni_type();
             for method in &cls.methods {
@@ -229,7 +248,7 @@ pub fn build_package_graphs(
             .keys()
             .enumerate()
             .map(|(i, k)| (k.as_str(), i))
-            .collect();
+            .collect(); // FxHashMap with capacity inferred by collect
 
         let mut adjacency: Vec<Vec<usize>> = vec![Vec::new(); node_count];
         let mut features: Vec<[i32; 13]> = Vec::with_capacity(node_count);
@@ -257,7 +276,10 @@ pub fn build_package_graphs(
 
         graph_data.insert(
             (*pkg).clone(),
-            Some(PackageGraph { adjacency, features }),
+            Some(PackageGraph {
+                adjacency,
+                features,
+            }),
         );
     }
 
@@ -280,7 +302,7 @@ fn build_neighborhoods(adj: &[Vec<usize>]) -> Vec<Vec<usize>> {
 }
 
 fn hash_label_and_neighbors(label: u64, neighbor_labels: &[u64]) -> u64 {
-    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    let mut hasher = FxHasher::default();
     label.hash(&mut hasher);
     for &nl in neighbor_labels {
         nl.hash(&mut hasher);
@@ -289,18 +311,14 @@ fn hash_label_and_neighbors(label: u64, neighbor_labels: &[u64]) -> u64 {
 }
 
 fn hash_features(features: &[i32; 13]) -> u64 {
-    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    let mut hasher = FxHasher::default();
     for v in features {
         v.hash(&mut hasher);
     }
     hasher.finish()
 }
 
-fn wl_histograms(
-    adj: &[Vec<usize>],
-    features_x: &[[i32; 13]],
-    n_iter: usize,
-) -> Vec<Histogram> {
+fn wl_histograms(adj: &[Vec<usize>], features_x: &[[i32; 13]], n_iter: usize) -> Vec<Histogram> {
     let neigh = build_neighborhoods(adj);
     let mut labels: Vec<u64> = features_x.iter().map(hash_features).collect();
     let mut new_labels = Vec::with_capacity(labels.len());
@@ -344,16 +362,12 @@ fn wl_similarity(hists_a: &[Histogram], hists_b: &[Histogram]) -> f64 {
     }
 
     let denom = (self_a * self_b).sqrt();
-    if denom > 0.0 {
-        cross / denom
-    } else {
-        0.0
-    }
+    if denom > 0.0 { cross / denom } else { 0.0 }
 }
 
 fn compute_sigs_and_names(
-    old_data: &HashMap<String, Option<PackageGraph>>,
-    new_data: &HashMap<String, Option<PackageGraph>>,
+    old_data: &FxHashMap<String, Option<PackageGraph>>,
+    new_data: &FxHashMap<String, Option<PackageGraph>>,
     n_iter: usize,
 ) -> (
     SigsMap,
@@ -366,18 +380,24 @@ fn compute_sigs_and_names(
     let old_sigs: SigsMap = old_data
         .par_iter()
         .filter_map(|(name, data_opt)| {
-            data_opt
-                .as_ref()
-                .map(|data| (name.clone(), wl_histograms(&data.adjacency, &data.features, n_iter)))
+            data_opt.as_ref().map(|data| {
+                (
+                    name.clone(),
+                    wl_histograms(&data.adjacency, &data.features, n_iter),
+                )
+            })
         })
         .collect();
 
     let new_sigs: SigsMap = new_data
         .par_iter()
         .filter_map(|(name, data_opt)| {
-            data_opt
-                .as_ref()
-                .map(|data| (name.clone(), wl_histograms(&data.adjacency, &data.features, n_iter)))
+            data_opt.as_ref().map(|data| {
+                (
+                    name.clone(),
+                    wl_histograms(&data.adjacency, &data.features, n_iter),
+                )
+            })
         })
         .collect();
 
@@ -403,9 +423,20 @@ fn compute_sigs_and_names(
         names.into_iter().cloned().collect()
     };
 
-    (old_sigs, new_sigs, old_names, new_names, old_no_graph, new_no_graph)
+    (
+        old_sigs,
+        new_sigs,
+        old_names,
+        new_names,
+        old_no_graph,
+        new_no_graph,
+    )
 }
 
+/// Greedy bipartite matching between old and new packages based on WL
+/// histogram similarity.  Results are labelled `MATCH`, `CHANGED`,
+/// `REMOVED`, or `NEW` depending on `match_threshold` and
+/// `change_threshold`.
 pub fn match_packages(
     old_sigs: &SigsMap,
     new_sigs: &SigsMap,
@@ -418,7 +449,6 @@ pub fn match_packages(
 ) -> Vec<(String, String, f64, String)> {
     let mut results: Vec<(String, String, f64, String)> = Vec::new();
     let mut used_new: FxHashSet<usize> = FxHashSet::default();
-
     let mut old_best: Vec<(usize, i32, f64)> = old_names
         .par_iter()
         .enumerate()
@@ -440,10 +470,7 @@ pub fn match_packages(
     old_best.sort_by(|a, b| b.2.partial_cmp(&a.2).unwrap());
 
     for &(i, best_j, best_s) in &old_best {
-        if best_j >= 0
-            && !used_new.contains(&(best_j as usize))
-            && best_s >= change_threshold
-        {
+        if best_j >= 0 && !used_new.contains(&(best_j as usize)) && best_s >= change_threshold {
             used_new.insert(best_j as usize);
             let nn = new_names[best_j as usize].clone();
             let status = if best_s >= match_threshold {
@@ -470,28 +497,20 @@ pub fn match_packages(
 
     for name in old_no_graph {
         if !results.iter().any(|r| &r.0 == name) {
-            results.push((
-                name.clone(),
-                "---".to_string(),
-                0.0,
-                "REMOVED".to_string(),
-            ));
+            results.push((name.clone(), "---".to_string(), 0.0, "REMOVED".to_string()));
         }
     }
     for name in new_no_graph {
         if !results.iter().any(|r| &r.1 == name) {
-            results.push((
-                "---".to_string(),
-                name.clone(),
-                0.0,
-                "NEW".to_string(),
-            ));
+            results.push(("---".to_string(), name.clone(), 0.0, "NEW".to_string()));
         }
     }
 
     results
 }
 
+/// High-level entry point: build package graphs for both APKs, run WL
+/// matching, and return a `MatchResult` with similarity scores.
 pub fn run_match(
     old_classes: &[SmaliClass],
     new_classes: &[SmaliClass],
@@ -517,5 +536,417 @@ pub fn run_match(
         results,
         old_pkg_methods: old_method_counts,
         new_pkg_methods: new_method_counts,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use smali::smali_ops::{Label, MethodRef, SmaliRegister};
+    use smali::types::MethodSignature;
+
+    #[test]
+    fn test_get_package_name_standard() {
+        assert_eq!(
+            get_package_name("Lcom/example/MyClass;"),
+            Some("com/example".to_string())
+        );
+    }
+
+    #[test]
+    fn test_get_package_name_default_package() {
+        assert_eq!(get_package_name("LMyClass;"), Some(String::new()));
+    }
+
+    #[test]
+    fn test_get_package_name_invalid() {
+        assert_eq!(get_package_name("not-jni"), None);
+    }
+
+    #[test]
+    fn test_pkg_display_normal() {
+        assert_eq!(pkg_display("com/example"), "com.example");
+    }
+
+    #[test]
+    fn test_pkg_display_empty() {
+        assert_eq!(pkg_display(""), "(default)");
+    }
+
+    #[test]
+    fn test_categorize_external_android() {
+        assert_eq!(categorize_external("Landroid/app/Activity;"), "android");
+    }
+
+    #[test]
+    fn test_categorize_external_androidx() {
+        assert_eq!(
+            categorize_external("Landroidx/core/app/Activity;"),
+            "androidx"
+        );
+    }
+
+    #[test]
+    fn test_categorize_external_java() {
+        assert_eq!(categorize_external("Ljava/lang/String;"), "java");
+        assert_eq!(categorize_external("Ljavax/net/ssl/SSLSocket;"), "java");
+    }
+
+    #[test]
+    fn test_categorize_external_kotlin() {
+        assert_eq!(
+            categorize_external("Lkotlin/jvm/internal/Intrinsics;"),
+            "kotlin"
+        );
+        assert_eq!(
+            categorize_external("Lkotlinx/coroutines/CoroutineScope;"),
+            "kotlin"
+        );
+    }
+
+    #[test]
+    fn test_categorize_external_other() {
+        assert_eq!(categorize_external("Lcom/example/MyClass;"), "other");
+    }
+
+    #[test]
+    fn test_is_branch_op_if_eq() {
+        assert!(is_branch_op(&DexOp::IfEq {
+            reg1: SmaliRegister::Local(0),
+            reg2: SmaliRegister::Local(1),
+            offset: Label("L1".to_string()),
+        }));
+    }
+
+    #[test]
+    fn test_is_branch_op_return_void() {
+        assert!(!is_branch_op(&DexOp::ReturnVoid));
+    }
+
+    #[test]
+    fn test_is_branch_op_goto() {
+        assert!(is_branch_op(&DexOp::Goto {
+            offset: Label("L1".to_string()),
+        }));
+    }
+
+    #[test]
+    fn test_is_branch_op_switch() {
+        assert!(is_branch_op(&DexOp::PackedSwitch {
+            reg: SmaliRegister::Local(0),
+            offset: Label("L1".to_string()),
+        }));
+        assert!(is_branch_op(&DexOp::SparseSwitch {
+            reg: SmaliRegister::Local(0),
+            offset: Label("L1".to_string()),
+        }));
+    }
+
+    #[test]
+    fn test_get_method_key() {
+        let m = SmaliMethod {
+            name: "foo".to_string(),
+            modifiers: vec![],
+            constructor: false,
+            signature: MethodSignature::from_jni("()V"),
+            locals: 0,
+            registers: None,
+            params: vec![],
+            annotations: vec![],
+            ops: vec![],
+        };
+        let key = get_method_key("Lcom/example/MyClass;", &m);
+        assert_eq!(key, "Lcom/example/MyClass;->foo()V");
+    }
+
+    #[test]
+    fn test_hash_features_stable() {
+        let f1 = [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13];
+        let f2 = [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13];
+        assert_eq!(hash_features(&f1), hash_features(&f2));
+    }
+
+    #[test]
+    fn test_hash_features_different() {
+        let f1 = [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13];
+        let f2 = [0, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13];
+        assert_ne!(hash_features(&f1), hash_features(&f2));
+    }
+
+    #[test]
+    fn test_hash_label_and_neighbors_stable() {
+        let h1 = hash_label_and_neighbors(42, &[1, 2, 3]);
+        let h2 = hash_label_and_neighbors(42, &[1, 2, 3]);
+        assert_eq!(h1, h2);
+    }
+
+    #[test]
+    fn test_hash_label_and_neighbors_different_label() {
+        let h1 = hash_label_and_neighbors(42, &[1, 2, 3]);
+        let h2 = hash_label_and_neighbors(99, &[1, 2, 3]);
+        assert_ne!(h1, h2);
+    }
+
+    #[test]
+    fn test_hash_label_and_neighbors_different_neighbors() {
+        let h1 = hash_label_and_neighbors(42, &[1, 2, 3]);
+        let h2 = hash_label_and_neighbors(42, &[4, 5, 6]);
+        assert_ne!(h1, h2);
+    }
+
+    #[test]
+    fn test_wl_similarity_identical() {
+        let hist_a: Vec<Histogram> = vec![
+            [(1, 2), (2, 3)].into_iter().collect(),
+            [(3, 1)].into_iter().collect(),
+        ];
+        let hist_b = hist_a.clone();
+        let sim = wl_similarity(&hist_a, &hist_b);
+        assert!((sim - 1.0).abs() < 1e-9);
+    }
+
+    #[test]
+    fn test_wl_similarity_orthogonal() {
+        let hist_a: Vec<Histogram> = vec![[(1, 2)].into_iter().collect()];
+        let hist_b: Vec<Histogram> = vec![[(2, 2)].into_iter().collect()];
+        let sim = wl_similarity(&hist_a, &hist_b);
+        assert!((sim - 0.0).abs() < 1e-9);
+    }
+
+    #[test]
+    fn test_wl_similarity_partial() {
+        let hist_a: Vec<Histogram> = vec![[(1, 2), (2, 2)].into_iter().collect()];
+        let hist_b: Vec<Histogram> = vec![[(1, 1), (2, 3)].into_iter().collect()];
+        let sim = wl_similarity(&hist_a, &hist_b);
+        let expected = 3.0 / (4.0f64 * 4.0f64).sqrt(); // min(2,1) + min(2,3) = 3, self_a=4, self_b=4
+        assert!((sim - expected).abs() < 1e-9);
+    }
+
+    #[test]
+    fn test_extract_method_features_no_ops() {
+        let method = SmaliMethod {
+            name: "foo".to_string(),
+            modifiers: vec![],
+            constructor: false,
+            signature: MethodSignature::from_jni("()V"),
+            locals: 0,
+            registers: None,
+            params: vec![],
+            annotations: vec![],
+            ops: vec![],
+        };
+        let (features, calls) = extract_method_features(&method, "com/example");
+        assert_eq!(features[IDX_NUM_PARAMS], 0);
+        assert_eq!(features[IDX_NUM_INSTRUCTIONS], 0);
+        assert_eq!(features[IDX_OUT_DEGREE], 0);
+        assert!(calls.is_empty());
+    }
+
+    #[test]
+    fn test_extract_method_features_with_invoke() {
+        let method = SmaliMethod {
+            name: "bar".to_string(),
+            modifiers: vec![],
+            constructor: false,
+            signature: MethodSignature::from_jni("()V"),
+            locals: 0,
+            registers: None,
+            params: vec![],
+            annotations: vec![],
+            ops: vec![SmaliOp::Op(DexOp::InvokeVirtual {
+                registers: vec![],
+                method: MethodRef {
+                    class: "Landroid/app/Activity;".to_string(),
+                    name: "onCreate".to_string(),
+                    descriptor: "(Landroid/os/Bundle;)V".to_string(),
+                },
+            })],
+        };
+        let (features, calls) = extract_method_features(&method, "com/example");
+        assert_eq!(features[IDX_INVOKE_VIRTUAL], 1);
+        assert_eq!(features[IDX_NUM_INSTRUCTIONS], 1);
+        assert_eq!(features[IDX_OUT_DEGREE], 1);
+        assert_eq!(features[IDX_EXT_ANDROID], 1);
+        assert!(calls.is_empty()); // not internal to com/example
+    }
+
+    #[test]
+    fn test_extract_method_features_internal_call() {
+        let method = SmaliMethod {
+            name: "callInternal".to_string(),
+            modifiers: vec![],
+            constructor: false,
+            signature: MethodSignature::from_jni("()V"),
+            locals: 0,
+            registers: None,
+            params: vec![],
+            annotations: vec![],
+            ops: vec![SmaliOp::Op(DexOp::InvokeStatic {
+                registers: vec![],
+                method: MethodRef {
+                    class: "Lcom/example/MyClass;".to_string(),
+                    name: "internalMethod".to_string(),
+                    descriptor: "()V".to_string(),
+                },
+            })],
+        };
+        let pkg = "com/example";
+        let (features, calls) = extract_method_features(&method, pkg);
+        assert_eq!(features[IDX_INVOKE_STATIC], 1);
+        assert_eq!(calls.len(), 1);
+        assert!(calls[0].contains("internalMethod"));
+    }
+
+    #[test]
+    fn test_extract_method_features_branch() {
+        let method = SmaliMethod {
+            name: "brancher".to_string(),
+            modifiers: vec![],
+            constructor: false,
+            signature: MethodSignature::from_jni("()V"),
+            locals: 0,
+            registers: None,
+            params: vec![],
+            annotations: vec![],
+            ops: vec![SmaliOp::Op(DexOp::IfEq {
+                reg1: SmaliRegister::Local(0),
+                reg2: SmaliRegister::Local(1),
+                offset: Label("L1".to_string()),
+            })],
+        };
+        let (features, _) = extract_method_features(&method, "com/example");
+        assert_eq!(features[IDX_HAS_BRANCHES], 1);
+    }
+
+    #[test]
+    fn test_build_neighborhoods_simple() {
+        let adj = vec![vec![1], vec![0, 2], vec![1]];
+        let neigh = build_neighborhoods(&adj);
+        assert!(neigh[0].contains(&1));
+        assert!(neigh[2].contains(&1));
+        assert!(neigh[1].contains(&0));
+        assert!(neigh[1].contains(&2));
+    }
+
+    #[test]
+    fn test_build_neighborhoods_no_edges() {
+        let adj = vec![vec![], vec![], vec![]];
+        let neigh = build_neighborhoods(&adj);
+        for n in &neigh {
+            assert!(n.is_empty());
+        }
+    }
+
+    #[test]
+    fn test_wl_histograms_single_node() {
+        let adj = vec![vec![]];
+        let features = [[1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]];
+        let hists = wl_histograms(&adj, &features, 2);
+        assert_eq!(hists.len(), 3); // 0, 1, 2 iterations
+        for hist in &hists {
+            assert_eq!(hist.len(), 1); // single node, single label
+        }
+    }
+
+    #[test]
+    fn test_wl_histograms_two_nodes() {
+        let adj = vec![vec![1], vec![0]];
+        let features = [
+            [1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0],
+            [2, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0],
+        ];
+        let hists = wl_histograms(&adj, &features, 1);
+        assert_eq!(hists.len(), 2);
+        // initial hist should have 2 distinct labels
+        assert_eq!(hists[0].len(), 2);
+    }
+
+    #[test]
+    fn test_match_packages_simple() {
+        let old_sigs: SigsMap = [("pkgA".to_string(), vec![[(1, 2)].into_iter().collect()])]
+            .into_iter()
+            .collect();
+        let new_sigs: SigsMap = [("pkgA".to_string(), vec![[(1, 2)].into_iter().collect()])]
+            .into_iter()
+            .collect();
+        let old_names = vec!["pkgA".to_string()];
+        let new_names = vec!["pkgA".to_string()];
+        let results = match_packages(
+            &old_sigs,
+            &new_sigs,
+            &old_names,
+            &new_names,
+            0.8,
+            0.0,
+            &[],
+            &[],
+        );
+        assert_eq!(results.len(), 1);
+        assert_eq!(results[0].0, "pkgA");
+        assert_eq!(results[0].1, "pkgA");
+        assert_eq!(results[0].3, "MATCH");
+    }
+
+    #[test]
+    fn test_match_packages_removed() {
+        let old_sigs: SigsMap = [("pkgOld".to_string(), vec![[(1, 2)].into_iter().collect()])]
+            .into_iter()
+            .collect();
+        let new_sigs: SigsMap = FxHashMap::default();
+        let old_names = vec!["pkgOld".to_string()];
+        let new_names: Vec<String> = vec![];
+        let results = match_packages(
+            &old_sigs,
+            &new_sigs,
+            &old_names,
+            &new_names,
+            0.8,
+            0.0,
+            &[],
+            &[],
+        );
+        assert_eq!(results.len(), 1);
+        assert_eq!(results[0].3, "REMOVED");
+    }
+
+    #[test]
+    fn test_match_packages_new() {
+        let old_sigs: SigsMap = FxHashMap::default();
+        let new_sigs: SigsMap = [("pkgNew".to_string(), vec![[(1, 2)].into_iter().collect()])]
+            .into_iter()
+            .collect();
+        let old_names: Vec<String> = vec![];
+        let new_names = vec!["pkgNew".to_string()];
+        let results = match_packages(
+            &old_sigs,
+            &new_sigs,
+            &old_names,
+            &new_names,
+            0.8,
+            0.0,
+            &[],
+            &[],
+        );
+        assert_eq!(results.len(), 1);
+        assert_eq!(results[0].3, "NEW");
+    }
+
+    #[test]
+    fn test_match_packages_no_graph() {
+        let results = match_packages(
+            &FxHashMap::default(),
+            &FxHashMap::default(),
+            &[],
+            &[],
+            0.8,
+            0.0,
+            &["pkgEmpty".to_string()],
+            &[],
+        );
+        assert!(
+            results
+                .iter()
+                .any(|r| r.0 == "pkgEmpty" && r.3 == "REMOVED")
+        );
     }
 }

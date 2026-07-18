@@ -1,21 +1,30 @@
+//! APK comparison logic — extract classes from two APKs, diff them at the
+//! method-signature level, and optionally dump changed smali to disk.
+
 use rayon::prelude::*;
 use regex::Regex;
 use smali::android::zip::is_top_level_dex_name;
 use smali::smali_ops::DexOp;
 use smali::types::SmaliMethod;
 use smali::{android::zip::ApkFile, dex::DexFile, types::SmaliClass, types::SmaliOp};
-use std::collections::HashMap;
+use rustc_hash::FxHashMap;
 use std::fs::{File, create_dir_all};
 use std::io::prelude::*;
 use std::path::Path;
 use tracing::error;
 
+/// Describes a single edit found when comparing two versions of an APK.
 pub enum EditType {
+    /// A method's body changed between the old and new APK.
     Change(String),
+    /// A method present in the old APK was removed from the new one.
     Remove(String),
+    /// A method present in the new APK did not exist in the old one.
     Addition(String),
 }
 
+/// Build a human-readable Java-style method signature from a class name and
+/// a `SmaliMethod`.
 pub fn construct_java_signature(class: String, m: &SmaliMethod) -> String {
     let argslist: Vec<String> = m.signature.args.iter().map(|item| item.to_java()).collect();
     format!(
@@ -33,9 +42,12 @@ fn method_filename(m: &SmaliMethod) -> String {
     format!("{}({}).smali", safe_name, args.join(", "))
 }
 
+/// For each changed / added / removed method, write the old and new smali to
+/// `output_dir/{old,new}/...`.  An optional list of `filters` restricts
+/// which smali lines are written.
 pub fn dump_changes_between_classes(
-    new_classes: HashMap<String, SmaliClass>,
-    old_classes: HashMap<String, SmaliClass>,
+    new_classes: FxHashMap<String, SmaliClass>,
+    old_classes: FxHashMap<String, SmaliClass>,
     output_dir_buf: &Path,
     filters: &[Regex],
 ) -> Result<(), std::io::Error> {
@@ -59,7 +71,7 @@ pub fn dump_changes_between_classes(
         let class_dir = key.replace(".", std::path::MAIN_SEPARATOR_STR);
 
         if let Some(old_class) = old_classes.get(key) {
-            let old_methods: HashMap<String, &SmaliMethod> = old_class
+            let old_methods: FxHashMap<String, &SmaliMethod> = old_class
                 .methods
                 .iter()
                 .map(|m| (construct_java_signature(key.clone(), m), m))
@@ -120,14 +132,17 @@ pub fn dump_changes_between_classes(
     }
     Ok(())
 }
+/// Compare two sets of classes (keyed by Java type name) and return a list
+/// of `EditType` values describing every change, addition, or removal at
+/// the method-signature level.
 pub fn find_changes_between_classes(
-    new_classes: HashMap<String, SmaliClass>,
-    old_classes: HashMap<String, SmaliClass>,
+    new_classes: FxHashMap<String, SmaliClass>,
+    old_classes: FxHashMap<String, SmaliClass>,
 ) -> Vec<EditType> {
     let mut res: Vec<EditType> = Vec::new();
     for (key, class) in &new_classes {
         if let Some(old_class) = old_classes.get(key) {
-            let old_methods: HashMap<String, &SmaliMethod> = old_class
+            let old_methods: FxHashMap<String, &SmaliMethod> = old_class
                 .methods
                 .iter()
                 .map(|m| (construct_java_signature(key.clone(), m), m))
@@ -167,6 +182,8 @@ pub fn find_changes_between_classes(
     res
 }
 
+/// Check whether two methods have the same sequence of `DexOp` discriminants
+/// (ignoring operands).  A structural equality check for smali methods.
 pub fn functions_match(old: &SmaliMethod, new: &SmaliMethod) -> bool {
     let old_ops: Vec<&DexOp> = old
         .ops
@@ -207,10 +224,11 @@ fn unpack_dex_file(dex: DexFile, filters: &[Regex], accum: &mut Vec<SmaliClass>)
     }
 }
 
+/// Read every DEX entry in an APK and return all `SmaliClass` values that
+/// match the optional regex filters.
 pub fn unpack_apk_classes(apk: &ApkFile, filters: &[Regex]) -> Vec<SmaliClass> {
-    apk.entry_names().filter(|x| is_top_level_dex_name(x))
-        .par_bridge()
-        .into_par_iter()
+    let entry_names: Vec<_> = apk.entry_names().filter(|x| is_top_level_dex_name(x)).collect();
+    entry_names.par_iter()
         .fold(Vec::<SmaliClass>::new, |mut accum, x| {
             let entry_res = apk.entry(x);
             if let Some(entry) = entry_res {
@@ -227,4 +245,113 @@ pub fn unpack_apk_classes(apk: &ApkFile, filters: &[Regex]) -> Vec<SmaliClass> {
             accum.extend(res);
             accum
         })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use smali::smali_ops::{Label, MethodRef};
+    use smali::types::MethodSignature;
+
+    fn make_method(name: &str, sig: &str, ops: Vec<SmaliOp>) -> SmaliMethod {
+        SmaliMethod {
+            name: name.to_string(),
+            modifiers: vec![],
+            constructor: false,
+            signature: MethodSignature::from_jni(sig),
+            locals: 0,
+            registers: None,
+            params: vec![],
+            annotations: vec![],
+            ops,
+        }
+    }
+
+    #[test]
+    fn test_construct_java_signature_simple() {
+        let m = make_method("foo", "()V", vec![]);
+        let sig = construct_java_signature("com.example.Test".to_string(), &m);
+        assert_eq!(sig, "com.example.Test: void foo([])");
+    }
+
+    #[test]
+    fn test_construct_java_signature_with_args() {
+        let m = make_method("bar", "(IZ)V", vec![]);
+        let sig = construct_java_signature("com.example.Test".to_string(), &m);
+        assert_eq!(sig, "com.example.Test: void bar([\"int\", \"boolean\"])");
+    }
+
+    #[test]
+    fn test_construct_java_signature_with_result() {
+        let m = make_method("getVal", "()I", vec![]);
+        let sig = construct_java_signature("com.example.Test".to_string(), &m);
+        assert_eq!(sig, "com.example.Test: int getVal([])");
+    }
+
+    #[test]
+    fn test_functions_match_identical() {
+        let ops = vec![SmaliOp::Op(DexOp::ReturnVoid)];
+        let a = make_method("foo", "()V", ops.clone());
+        let b = make_method("foo", "()V", ops);
+        assert!(functions_match(&a, &b));
+    }
+
+    #[test]
+    fn test_functions_match_different_op_count() {
+        let a = make_method("foo", "()V", vec![SmaliOp::Op(DexOp::ReturnVoid)]);
+        let b = make_method("foo", "()V", vec![]);
+        assert!(!functions_match(&a, &b));
+    }
+
+    #[test]
+    fn test_functions_match_different_ops() {
+        let mref = MethodRef {
+            class: "Lcom/example/Other;".to_string(),
+            name: "helper".to_string(),
+            descriptor: "()V".to_string(),
+        };
+        let a = make_method("foo", "()V", vec![SmaliOp::Op(DexOp::ReturnVoid)]);
+        let b = make_method("foo", "()V", vec![
+            SmaliOp::Op(DexOp::InvokeVirtual { registers: vec![], method: mref }),
+        ]);
+        assert!(!functions_match(&a, &b));
+    }
+
+    #[test]
+    fn test_functions_match_different_operands_same_discriminant() {
+        let a = make_method("foo", "()V", vec![
+            SmaliOp::Op(DexOp::Goto { offset: Label("L1".to_string()) }),
+        ]);
+        let b = make_method("foo", "()V", vec![
+            SmaliOp::Op(DexOp::Goto { offset: Label("L2".to_string()) }),
+        ]);
+        assert!(functions_match(&a, &b));
+    }
+
+    #[test]
+    fn test_edit_type_display_change() {
+        let e = EditType::Change("com.example.Test: void foo()".to_string());
+        match e {
+            EditType::Change(s) => assert_eq!(s, "com.example.Test: void foo()"),
+            _ => panic!("expected Change"),
+        }
+    }
+
+    #[test]
+    fn test_edit_type_display_addition() {
+        let e = EditType::Addition("com.example.Test: int bar()".to_string());
+        match e {
+            EditType::Addition(s) => assert_eq!(s, "com.example.Test: int bar()"),
+            _ => panic!("expected Addition"),
+        }
+    }
+
+    #[test]
+    fn test_edit_type_display_remove() {
+        let e = EditType::Remove("com.example.Test: void baz()".to_string());
+        match e {
+            EditType::Remove(s) => assert_eq!(s, "com.example.Test: void baz()"),
+            _ => panic!("expected Remove"),
+        }
+    }
 }
