@@ -1,7 +1,21 @@
 [package]
 name = "apkhound"
-version = "0.1.0"
+version = "0.3.0"
 edition = "2024"
+
+[profile.release]
+lto = "fat"
+codegen-units = 1
+opt-level = 3
+strip = "symbols"
+debug = true 
+
+[[bench]]
+name = "speed_test"
+harness = false
+
+[dev-dependencies]
+criterion = { version = "0.5", features = ["html_reports"]}
 
 [dependencies]
 clap = {version="4.6.1", features=["derive"]}
