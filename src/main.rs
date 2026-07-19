@@ -67,6 +67,9 @@ enum Commands {
         /// Regex filter for class names (can be specified multiple times)
         #[arg(short = 'f', long = "filterclass")]
         filters: Vec<String>,
+        /// Enable node-label consistency check for more precise matching
+        #[arg(long = "node-matching", default_value_t = false)]
+        node_matching: bool,
     },
     /// Compare manifest permissions between two APKs, or list permissions of one
     Permissions {
@@ -117,6 +120,7 @@ fn main() {
             csv,
             show_details,
             filters,
+            node_matching,
         } => commands::match_cmd::handle_match(
             old_apk,
             new_apk,
@@ -127,6 +131,7 @@ fn main() {
                 csv,
                 show_details,
                 filters,
+                use_node_matching: node_matching,
             },
         ),
         Commands::Permissions { old_apk, new_apk } => {

@@ -18,6 +18,7 @@ pub struct MatchConfig {
     pub csv: bool,
     pub show_details: bool,
     pub filters: Vec<String>,
+    pub use_node_matching: bool,
 }
 
 /// Run package matching between two APKs and output the results as either a
@@ -44,6 +45,7 @@ pub fn handle_match(old_apk: PathBuf, new_apk: PathBuf, cfg: MatchConfig) -> Res
                 cfg.threshold,
                 cfg.change_threshold,
                 cfg.wl_iterations,
+                cfg.use_node_matching,
             );
 
             if cfg.csv {

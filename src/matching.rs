@@ -13,7 +13,17 @@ use smali::types::{SmaliClass, SmaliMethod, SmaliOp};
 
 /// A count of how many times each WL label appears at a given iteration.
 pub type Histogram = FxHashMap<u64, usize>;
-type SigsMap = FxHashMap<String, Vec<Histogram>>;
+
+/// Bundles the WL histograms, per-node final labels, and adjacency of a
+/// single package, so the matching layer can optionally run a node-label
+/// consistency check in addition to histogram intersection.
+pub struct WLSig {
+    pub hists: Vec<Histogram>,
+    pub final_labels: Vec<u64>,
+    pub adjacency: Vec<Vec<usize>>,
+}
+
+type SigsMap = FxHashMap<String, WLSig>;
 
 pub struct SideData<'a> {
     pub sigs: &'a SigsMap,
@@ -324,7 +334,7 @@ fn hash_features(features: &[i32; 13]) -> u64 {
     hasher.finish()
 }
 
-fn wl_histograms(adj: &[Vec<usize>], features_x: &[[i32; 13]], n_iter: usize) -> Vec<Histogram> {
+fn wl_histograms(adj: &[Vec<usize>], features_x: &[[i32; 13]], n_iter: usize) -> WLSig {
     let neigh = build_neighborhoods(adj);
     let mut labels: Vec<u64> = features_x.iter().map(hash_features).collect();
     let mut new_labels = Vec::with_capacity(labels.len());
@@ -348,7 +358,11 @@ fn wl_histograms(adj: &[Vec<usize>], features_x: &[[i32; 13]], n_iter: usize) ->
             std::mem::swap(&mut labels, &mut new_labels);
         }
     }
-    hists
+    WLSig {
+        hists,
+        final_labels: labels,
+        adjacency: adj.to_vec(),
+    }
 }
 
 fn wl_similarity(hists_a: &[Histogram], hists_b: &[Histogram]) -> f64 {
@@ -369,6 +383,49 @@ fn wl_similarity(hists_a: &[Histogram], hists_b: &[Histogram]) -> f64 {
 
     let denom = (self_a * self_b).sqrt();
     if denom > 0.0 { cross / denom } else { 0.0 }
+}
+
+/// Compare the sorted per-node (label, sorted-neighbor-labels) tuples between
+/// two packages.  Returns the fraction of nodes (up to the longer package) that
+/// have an identical signature — a finer-grained structural measure than the
+/// histogram intersection used by [`wl_similarity`].
+fn node_label_consistency(a: &WLSig, b: &WLSig) -> f64 {
+    let neigh_a = build_neighborhoods(&a.adjacency);
+    let neigh_b = build_neighborhoods(&b.adjacency);
+
+    let mut sigs_a: Vec<(u64, Vec<u64>)> = a
+        .final_labels
+        .iter()
+        .enumerate()
+        .map(|(v, &lbl)| {
+            let mut nbrs: Vec<u64> =
+                neigh_a[v].iter().map(|&n| a.final_labels[n]).collect();
+            nbrs.sort_unstable();
+            (lbl, nbrs)
+        })
+        .collect();
+    let mut sigs_b: Vec<(u64, Vec<u64>)> = b
+        .final_labels
+        .iter()
+        .enumerate()
+        .map(|(v, &lbl)| {
+            let mut nbrs: Vec<u64> =
+                neigh_b[v].iter().map(|&n| b.final_labels[n]).collect();
+            nbrs.sort_unstable();
+            (lbl, nbrs)
+        })
+        .collect();
+
+    sigs_a.sort();
+    sigs_b.sort();
+
+    let matches = sigs_a.iter().zip(sigs_b.iter()).filter(|(a, b)| a == b).count();
+    let max_len = sigs_a.len().max(sigs_b.len());
+    if max_len == 0 {
+        1.0
+    } else {
+        matches as f64 / max_len as f64
+    }
 }
 
 fn compute_sigs_and_names(
@@ -443,11 +500,18 @@ fn compute_sigs_and_names(
 /// histogram similarity.  Results are labelled `MATCH`, `CHANGED`,
 /// `REMOVED`, or `NEW` depending on `match_threshold` and
 /// `change_threshold`.
+///
+/// When `use_node_matching` is true, the scores of matched/changed pairs are
+/// additionally penalised by the node-label consistency check *after* the
+/// bipartite assignment is made, so the matching decisions are driven purely
+/// by the histogram kernel and the consistency check only refines the final
+/// score.
 pub fn match_packages(
     old: SideData,
     new: SideData,
     match_threshold: f64,
     change_threshold: f64,
+    use_node_matching: bool,
 ) -> Vec<(String, String, f64, String)> {
     let mut results: Vec<(String, String, f64, String)> = Vec::new();
     let mut used_new: FxHashSet<usize> = FxHashSet::default();
@@ -456,11 +520,12 @@ pub fn match_packages(
         .par_iter()
         .enumerate()
         .map(|(i, on)| {
-            let hi_a = &old.sigs[on];
+            let sig_a = &old.sigs[on];
             let mut best_j = -1i32;
             let mut best_s = 0.0f64;
             for (j, nn) in new.names.iter().enumerate() {
-                let s = wl_similarity(hi_a, &new.sigs[nn]);
+                let sig_b = &new.sigs[nn];
+                let s = wl_similarity(&sig_a.hists, &sig_b.hists);
                 if s > best_s {
                     best_s = s;
                     best_j = j as i32;
@@ -509,6 +574,23 @@ pub fn match_packages(
         }
     }
 
+    if use_node_matching {
+        for (old_name, new_name, score, status) in &mut results {
+            if *status == "MATCH" || *status == "CHANGED" {
+                if let (Some(sig_a), Some(sig_b)) =
+                    (old.sigs.get(old_name), new.sigs.get(new_name))
+                {
+                    *score *= node_label_consistency(sig_a, sig_b);
+                    if *score < change_threshold {
+                        *status = "REMOVED".to_string();
+                    } else if *score < match_threshold {
+                        *status = "CHANGED".to_string();
+                    }
+                }
+            }
+        }
+    }
+
     results
 }
 
@@ -520,6 +602,7 @@ pub fn run_match(
     match_threshold: f64,
     change_threshold: f64,
     wl_iterations: usize,
+    use_node_matching: bool,
 ) -> MatchResult {
     let (old_data, old_method_counts) = build_package_graphs(old_classes);
     let (new_data, new_method_counts) = build_package_graphs(new_classes);
@@ -538,6 +621,7 @@ pub fn run_match(
         },
         match_threshold,
         change_threshold,
+        use_node_matching,
     );
     MatchResult {
         results,
@@ -848,9 +932,9 @@ mod tests {
     fn test_wl_histograms_single_node() {
         let adj = vec![vec![]];
         let features = [[1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]];
-        let hists = wl_histograms(&adj, &features, 2);
-        assert_eq!(hists.len(), 3); // 0, 1, 2 iterations
-        for hist in &hists {
+        let sig = wl_histograms(&adj, &features, 2);
+        assert_eq!(sig.hists.len(), 3); // 0, 1, 2 iterations
+        for hist in &sig.hists {
             assert_eq!(hist.len(), 1); // single node, single label
         }
     }
@@ -862,20 +946,34 @@ mod tests {
             [1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0],
             [2, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0],
         ];
-        let hists = wl_histograms(&adj, &features, 1);
-        assert_eq!(hists.len(), 2);
+        let sig = wl_histograms(&adj, &features, 1);
+        assert_eq!(sig.hists.len(), 2);
         // initial hist should have 2 distinct labels
-        assert_eq!(hists[0].len(), 2);
+        assert_eq!(sig.hists[0].len(), 2);
     }
 
     #[test]
     fn test_match_packages_simple() {
-        let old_sigs: SigsMap = [("pkgA".to_string(), vec![[(1, 2)].into_iter().collect()])]
-            .into_iter()
-            .collect();
-        let new_sigs: SigsMap = [("pkgA".to_string(), vec![[(1, 2)].into_iter().collect()])]
-            .into_iter()
-            .collect();
+        let old_sigs: SigsMap = [(
+            "pkgA".to_string(),
+            WLSig {
+                hists: vec![[(1, 2)].into_iter().collect()],
+                final_labels: vec![],
+                adjacency: vec![],
+            },
+        )]
+        .into_iter()
+        .collect();
+        let new_sigs: SigsMap = [(
+            "pkgA".to_string(),
+            WLSig {
+                hists: vec![[(1, 2)].into_iter().collect()],
+                final_labels: vec![],
+                adjacency: vec![],
+            },
+        )]
+        .into_iter()
+        .collect();
         let old_names = vec!["pkgA".to_string()];
         let new_names = vec!["pkgA".to_string()];
         let results = match_packages(
@@ -891,6 +989,7 @@ mod tests {
             },
             0.8,
             0.0,
+            false,
         );
         assert_eq!(results.len(), 1);
         assert_eq!(results[0].0, "pkgA");
@@ -900,9 +999,16 @@ mod tests {
 
     #[test]
     fn test_match_packages_removed() {
-        let old_sigs: SigsMap = [("pkgOld".to_string(), vec![[(1, 2)].into_iter().collect()])]
-            .into_iter()
-            .collect();
+        let old_sigs: SigsMap = [(
+            "pkgOld".to_string(),
+            WLSig {
+                hists: vec![[(1, 2)].into_iter().collect()],
+                final_labels: vec![],
+                adjacency: vec![],
+            },
+        )]
+        .into_iter()
+        .collect();
         let new_sigs: SigsMap = FxHashMap::default();
         let old_names = vec!["pkgOld".to_string()];
         let new_names: Vec<String> = vec![];
@@ -919,6 +1025,7 @@ mod tests {
             },
             0.8,
             0.0,
+            false,
         );
         assert_eq!(results.len(), 1);
         assert_eq!(results[0].3, "REMOVED");
@@ -927,9 +1034,16 @@ mod tests {
     #[test]
     fn test_match_packages_new() {
         let old_sigs: SigsMap = FxHashMap::default();
-        let new_sigs: SigsMap = [("pkgNew".to_string(), vec![[(1, 2)].into_iter().collect()])]
-            .into_iter()
-            .collect();
+        let new_sigs: SigsMap = [(
+            "pkgNew".to_string(),
+            WLSig {
+                hists: vec![[(1, 2)].into_iter().collect()],
+                final_labels: vec![],
+                adjacency: vec![],
+            },
+        )]
+        .into_iter()
+        .collect();
         let old_names: Vec<String> = vec![];
         let new_names = vec!["pkgNew".to_string()];
         let results = match_packages(
@@ -945,6 +1059,7 @@ mod tests {
             },
             0.8,
             0.0,
+            false,
         );
         assert_eq!(results.len(), 1);
         assert_eq!(results[0].3, "NEW");
@@ -965,6 +1080,7 @@ mod tests {
             },
             0.8,
             0.0,
+            false,
         );
         assert!(
             results
