@@ -398,8 +398,7 @@ fn node_label_consistency(a: &WLSig, b: &WLSig) -> f64 {
         .iter()
         .enumerate()
         .map(|(v, &lbl)| {
-            let mut nbrs: Vec<u64> =
-                neigh_a[v].iter().map(|&n| a.final_labels[n]).collect();
+            let mut nbrs: Vec<u64> = neigh_a[v].iter().map(|&n| a.final_labels[n]).collect();
             nbrs.sort_unstable();
             (lbl, nbrs)
         })
@@ -409,8 +408,7 @@ fn node_label_consistency(a: &WLSig, b: &WLSig) -> f64 {
         .iter()
         .enumerate()
         .map(|(v, &lbl)| {
-            let mut nbrs: Vec<u64> =
-                neigh_b[v].iter().map(|&n| b.final_labels[n]).collect();
+            let mut nbrs: Vec<u64> = neigh_b[v].iter().map(|&n| b.final_labels[n]).collect();
             nbrs.sort_unstable();
             (lbl, nbrs)
         })
@@ -419,7 +417,11 @@ fn node_label_consistency(a: &WLSig, b: &WLSig) -> f64 {
     sigs_a.sort();
     sigs_b.sort();
 
-    let matches = sigs_a.iter().zip(sigs_b.iter()).filter(|(a, b)| a == b).count();
+    let matches = sigs_a
+        .iter()
+        .zip(sigs_b.iter())
+        .filter(|(a, b)| a == b)
+        .count();
     let max_len = sigs_a.len().max(sigs_b.len());
     if max_len == 0 {
         1.0
@@ -576,16 +578,14 @@ pub fn match_packages(
 
     if use_node_matching {
         for (old_name, new_name, score, status) in &mut results {
-            if *status == "MATCH" || *status == "CHANGED" {
-                if let (Some(sig_a), Some(sig_b)) =
-                    (old.sigs.get(old_name), new.sigs.get(new_name))
-                {
-                    *score *= node_label_consistency(sig_a, sig_b);
-                    if *score < change_threshold {
-                        *status = "REMOVED".to_string();
-                    } else if *score < match_threshold {
-                        *status = "CHANGED".to_string();
-                    }
+            if (*status == "MATCH" || *status == "CHANGED")
+                && let (Some(sig_a), Some(sig_b)) = (old.sigs.get(old_name), new.sigs.get(new_name))
+            {
+                *score *= node_label_consistency(sig_a, sig_b);
+                if *score < change_threshold {
+                    *status = "REMOVED".to_string();
+                } else if *score < match_threshold {
+                    *status = "CHANGED".to_string();
                 }
             }
         }
