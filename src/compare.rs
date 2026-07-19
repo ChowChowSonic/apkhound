@@ -145,7 +145,7 @@ pub fn dump_changes_between_classes(
             for old_method in &old_class.methods {
                 create_dir_all(&old_dir)?;
                 let fname = method_filename(old_method);
-                let mut f = File::create_new(old_dir.join(&fname))?;
+                let mut f = File::create(old_dir.join(&fname))?;
                 write!(f, "{}", filtered_smali(old_method))?;
             }
         }
