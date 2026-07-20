@@ -35,6 +35,7 @@ pub fn handle_callgraph(apk_path: Vec<PathBuf>, filters: Vec<String>) -> Result<
                     });
                 } else if let Err(e) = apk_result {
                     error!("Failed to parse APK file: {e}");
+                    panic!("Failed to parse APK file");
                 }
                 accum
             },

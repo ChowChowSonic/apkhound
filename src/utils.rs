@@ -16,6 +16,7 @@ pub fn build_regex(filters: &[String]) -> Vec<Regex> {
             regex.push(r);
         } else if let Err(e) = regex_val {
             error!("Failed to parse regex {x:?} due to reason: {e}");
+            panic!("Failed to parse regex");
         }
     }
     regex
@@ -103,7 +104,8 @@ mod tests {
     }
 
     #[test]
-    fn test_build_regex_invalid_skipped() {
+    #[should_panic]
+    fn test_build_regex_invalid_fails() {
         let filters = vec![
             "^com\\.example".to_string(),
             "[invalid".to_string(),
