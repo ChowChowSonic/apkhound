@@ -94,7 +94,7 @@ apkhound extract <old_apk> <new_apk> <output_dir> [-f <class_regex>...] [-s <sma
 | `-f`, `--filterclass` | Regex filter for class names (repeatable) |
 | `-s`, `--filtersmali` | Regex filter for smali line content (repeatable) |
 
-Output: `<output_dir>/old/` and `<output_dir>/new/` mirroring the original directory structure.
+Output: `<output_dir>/old/` and `<output_dir>/new/` mirroring the original directory structure. This output is best viewed with a tool like [ripdiff](https://github.com/ChowChowSonic/ripdiff) to more easily get a sense of what changed.
 
 ### `match`
 
