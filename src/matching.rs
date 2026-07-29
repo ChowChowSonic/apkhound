@@ -1,6 +1,6 @@
 //! Weisfeiler-Lehman graph kernel matching across packages in two APKs.
 //!
-//! Builds a call-graph per package, extracts a 13-dimensional feature
+//! Builds a call-graph per package, extracts a 19-dimensional feature
 //! vector per method, runs WL refinement to produce multi-level histogram
 //! signatures, then performs greedy bipartite matching between packages.
 
@@ -9,7 +9,7 @@ use std::hash::{Hash, Hasher};
 use rayon::prelude::*;
 use rustc_hash::{FxHashMap, FxHashSet, FxHasher};
 use smali::smali_ops::DexOp;
-use smali::types::{SmaliClass, SmaliMethod, SmaliOp};
+use smali::types::{SmaliClass, SmaliMethod, SmaliOp, TypeSignature};
 
 /// A count of how many times each WL label appears at a given iteration.
 pub type Histogram = FxHashMap<u64, usize>;
@@ -25,10 +25,21 @@ pub struct WLSig {
 
 type SigsMap = FxHashMap<String, WLSig>;
 
+/// API-call fingerprint for a single package: the set of (class, method_name)
+/// pairs this package calls externally. These survive obfuscation because
+/// framework/library class names are never renamed.
+#[derive(Clone, Default)]
+pub struct ApiFingerprint {
+    pub api_calls: FxHashSet<(String, String)>,
+}
+
+type ApiFingerprints = FxHashMap<String, ApiFingerprint>;
+
 pub struct SideData<'a> {
     pub sigs: &'a SigsMap,
     pub names: &'a [String],
     pub no_graph: &'a [String],
+    pub api_fps: &'a ApiFingerprints,
 }
 
 /// A directed call graph for a single package.
@@ -38,7 +49,7 @@ pub struct PackageGraph {
     /// Adjacency list: for each node, the indices of methods it calls.
     pub adjacency: Vec<Vec<usize>>,
     /// 13-element feature vectors for each method node.
-    pub features: Vec<[i32; 13]>,
+    pub features: Vec<[i32; 19]>,
 }
 
 /// The output of a matching run.
@@ -65,6 +76,12 @@ const IDX_INVOKE_INTERFACE: usize = 9;
 const IDX_NUM_PARAMS: usize = 10;
 const IDX_NUM_INSTRUCTIONS: usize = 11;
 const IDX_HAS_BRANCHES: usize = 12;
+const IDX_STRING_CONSTS: usize = 13;
+const IDX_FIELD_ACCESS: usize = 14;
+const IDX_TRY_CATCH: usize = 15;
+const IDX_REGISTER_COUNT: usize = 16;
+const IDX_IS_CONSTRUCTOR: usize = 17;
+const IDX_RETURN_TYPE: usize = 18;
 
 fn get_package_name(jni_class: &str) -> Option<String> {
     let inner = jni_class.strip_prefix('L')?.strip_suffix(';')?;
@@ -131,12 +148,16 @@ fn is_branch_op(dop: &DexOp) -> bool {
     )
 }
 
-fn extract_method_features(method: &SmaliMethod, package_name: &str) -> ([i32; 13], Vec<String>) {
-    let mut features = [0i32; 13];
+fn extract_method_features(
+    method: &SmaliMethod,
+    package_name: &str,
+) -> ([i32; 19], Vec<String>, Vec<(String, String)>) {
+    let mut features = [0i32; 19];
 
     features[IDX_NUM_PARAMS] = method.params.len() as i32;
 
     let mut internal_calls: Vec<String> = Vec::new();
+    let mut api_calls: Vec<(String, String)> = Vec::new();
     let mut out_degree = 0i32;
     let mut num_instructions = 0i32;
     let mut has_branches = 0i32;
@@ -148,15 +169,61 @@ fn extract_method_features(method: &SmaliMethod, package_name: &str) -> ([i32; 1
     let mut ext_java = 0i32;
     let mut ext_kotlin = 0i32;
     let mut ext_other = 0i32;
+    let mut string_consts = 0i32;
+    let mut field_access = 0i32;
 
     for sop in &method.ops {
         let SmaliOp::Op(dop) = sop else {
+            if matches!(sop, SmaliOp::Catch(_)) {
+                features[IDX_TRY_CATCH] += 1;
+            }
             continue;
         };
         num_instructions += 1;
 
         if is_branch_op(dop) {
             has_branches = 1;
+        }
+
+        if matches!(
+            dop,
+            DexOp::ConstString { .. } | DexOp::ConstStringJumbo { .. }
+        ) {
+            string_consts += 1;
+        }
+
+        if matches!(
+            dop,
+            DexOp::IGet { .. }
+                | DexOp::IGetWide { .. }
+                | DexOp::IGetObject { .. }
+                | DexOp::IGetBoolean { .. }
+                | DexOp::IGetByte { .. }
+                | DexOp::IGetChar { .. }
+                | DexOp::IGetShort { .. }
+                | DexOp::IPut { .. }
+                | DexOp::IPutWide { .. }
+                | DexOp::IPutObject { .. }
+                | DexOp::IPutBoolean { .. }
+                | DexOp::IPutByte { .. }
+                | DexOp::IPutChar { .. }
+                | DexOp::IPutShort { .. }
+                | DexOp::SGet { .. }
+                | DexOp::SGetWide { .. }
+                | DexOp::SGetObject { .. }
+                | DexOp::SGetBoolean { .. }
+                | DexOp::SGetByte { .. }
+                | DexOp::SGetChar { .. }
+                | DexOp::SGetShort { .. }
+                | DexOp::SPut { .. }
+                | DexOp::SPutWide { .. }
+                | DexOp::SPutObject { .. }
+                | DexOp::SPutBoolean { .. }
+                | DexOp::SPutByte { .. }
+                | DexOp::SPutChar { .. }
+                | DexOp::SPutShort { .. }
+        ) {
+            field_access += 1;
         }
 
         let (invoke_kind, mref_opt) = match dop {
@@ -197,6 +264,8 @@ fn extract_method_features(method: &SmaliMethod, package_name: &str) -> ([i32; 1
             if callee_pkg.as_deref() == Some(package_name) {
                 internal_calls.push(callee_key);
             } else {
+                // Collect external API calls: (class, method_name)
+                api_calls.push((mref.class.clone(), mref.name.clone()));
                 match categorize_external(&mref.class) {
                     "android" | "androidx" => ext_android += 1,
                     "java" => ext_java += 1,
@@ -218,8 +287,31 @@ fn extract_method_features(method: &SmaliMethod, package_name: &str) -> ([i32; 1
     features[IDX_EXT_JAVA] = ext_java;
     features[IDX_EXT_KOTLIN] = ext_kotlin;
     features[IDX_EXT_OTHER] = ext_other;
+    features[IDX_STRING_CONSTS] = string_consts;
+    features[IDX_FIELD_ACCESS] = field_access;
+    features[IDX_REGISTER_COUNT] = method.registers.unwrap_or(method.locals) as i32;
+    features[IDX_IS_CONSTRUCTOR] = if method.constructor { 1 } else { 0 };
+    features[IDX_RETURN_TYPE] = match &method.signature.result {
+        t if t == &TypeSignature::Void => 0,
+        t if is_primitive_type(t) => 1,
+        _ => 2,
+    };
 
-    (features, internal_calls)
+    (features, internal_calls, api_calls)
+}
+
+fn is_primitive_type(ts: &TypeSignature) -> bool {
+    matches!(
+        ts,
+        TypeSignature::Bool
+            | TypeSignature::Byte
+            | TypeSignature::Char
+            | TypeSignature::Short
+            | TypeSignature::Int
+            | TypeSignature::Long
+            | TypeSignature::Float
+            | TypeSignature::Double
+    )
 }
 
 /// Partition a list of `SmaliClass` values by package, build a
@@ -230,6 +322,7 @@ pub fn build_package_graphs(
 ) -> (
     FxHashMap<String, Option<PackageGraph>>,
     FxHashMap<String, usize>,
+    ApiFingerprints,
 ) {
     let mut pkgs: FxHashMap<String, Vec<&SmaliClass>> = FxHashMap::default();
     for c in classes {
@@ -241,6 +334,7 @@ pub fn build_package_graphs(
 
     let mut method_counts: FxHashMap<String, usize> = FxHashMap::default();
     let mut graph_data: FxHashMap<String, Option<PackageGraph>> = FxHashMap::default();
+    let mut api_fingerprints: ApiFingerprints = FxHashMap::default();
     for (pkg, cls_list) in &pkgs {
         let total_methods: usize = cls_list.iter().map(|c| c.methods.len()).sum();
         method_counts.insert((*pkg).clone(), total_methods);
@@ -256,6 +350,7 @@ pub fn build_package_graphs(
 
         if methods.is_empty() {
             graph_data.insert((*pkg).clone(), None);
+            api_fingerprints.insert((*pkg).clone(), ApiFingerprint::default());
             continue;
         }
 
@@ -264,20 +359,24 @@ pub fn build_package_graphs(
             .keys()
             .enumerate()
             .map(|(i, k)| (k.as_str(), i))
-            .collect(); // FxHashMap with capacity inferred by collect
+            .collect();
 
         let mut adjacency: Vec<Vec<usize>> = vec![Vec::new(); node_count];
-        let mut features: Vec<[i32; 13]> = Vec::with_capacity(node_count);
+        let mut features: Vec<[i32; 19]> = Vec::with_capacity(node_count);
+        let mut pkg_api_calls: FxHashSet<(String, String)> = FxHashSet::default();
 
         for (key, method) in &methods {
             let i = method_ids[key.as_str()];
-            let (feats, internal_calls) = extract_method_features(method, pkg);
+            let (feats, internal_calls, api_calls) = extract_method_features(method, pkg);
             for callee_key in &internal_calls {
                 if let Some(&j) = method_ids.get(callee_key.as_str()) {
                     adjacency[i].push(j);
                 }
             }
             features.push(feats);
+            for (class, method_name) in api_calls {
+                pkg_api_calls.insert((class, method_name));
+            }
         }
 
         let mut in_deg = vec![0i32; node_count];
@@ -297,9 +396,15 @@ pub fn build_package_graphs(
                 features,
             }),
         );
+        api_fingerprints.insert(
+            (*pkg).clone(),
+            ApiFingerprint {
+                api_calls: pkg_api_calls,
+            },
+        );
     }
 
-    (graph_data, method_counts)
+    (graph_data, method_counts, api_fingerprints)
 }
 
 fn build_neighborhoods(adj: &[Vec<usize>]) -> Vec<Vec<usize>> {
@@ -326,7 +431,7 @@ fn hash_label_and_neighbors(label: u64, neighbor_labels: &[u64]) -> u64 {
     hasher.finish()
 }
 
-fn hash_features(features: &[i32; 13]) -> u64 {
+fn hash_features(features: &[i32; 19]) -> u64 {
     let mut hasher = FxHasher::default();
     for v in features {
         v.hash(&mut hasher);
@@ -334,7 +439,7 @@ fn hash_features(features: &[i32; 13]) -> u64 {
     hasher.finish()
 }
 
-fn wl_histograms(adj: &[Vec<usize>], features_x: &[[i32; 13]], n_iter: usize) -> WLSig {
+fn wl_histograms(adj: &[Vec<usize>], features_x: &[[i32; 19]], n_iter: usize) -> WLSig {
     let neigh = build_neighborhoods(adj);
     let mut labels: Vec<u64> = features_x.iter().map(hash_features).collect();
     let mut new_labels = Vec::with_capacity(labels.len());
@@ -383,6 +488,20 @@ fn wl_similarity(hists_a: &[Histogram], hists_b: &[Histogram]) -> f64 {
 
     let denom = (self_a * self_b).sqrt();
     if denom > 0.0 { cross / denom } else { 0.0 }
+}
+
+/// Compute Jaccard similarity between two API-call fingerprints.
+/// A score of 1.0 means both packages call exactly the same framework/library APIs;
+/// 0.0 means they share no external API calls.
+fn api_similarity(a: &ApiFingerprint, b: &ApiFingerprint) -> f64 {
+    let intersection = a.api_calls.intersection(&b.api_calls).count();
+    let union = a.api_calls.union(&b.api_calls).count();
+    if union == 0 {
+        // Both packages have no external API calls — they're equivalent in API space
+        1.0
+    } else {
+        intersection as f64 / union as f64
+    }
 }
 
 /// Compare the sorted per-node (label, sorted-neighbor-labels) tuples between
@@ -498,6 +617,76 @@ fn compute_sigs_and_names(
     )
 }
 
+fn compute_scores(old: &SideData, new: &SideData, api_weight: f64) -> Vec<(usize, i32, f64)> {
+    let wl_weight = 1.0 - api_weight;
+    old.names
+        .par_iter()
+        .enumerate()
+        .map(|(i, on)| {
+            let sig_a = &old.sigs[on];
+            let fp_a = old.api_fps.get(on);
+            let mut best_j = -1i32;
+            let mut best_s = 0.0f64;
+            for (j, nn) in new.names.iter().enumerate() {
+                let sig_b = &new.sigs[nn];
+                let fp_b = new.api_fps.get(nn);
+                let s_wl = wl_similarity(&sig_a.hists, &sig_b.hists);
+                let s_api = match (fp_a, fp_b) {
+                    (Some(a), Some(b)) => api_similarity(a, b),
+                    _ => 0.0,
+                };
+                let s = wl_weight * s_wl + api_weight * s_api;
+                if s > best_s {
+                    best_s = s;
+                    best_j = j as i32;
+                }
+            }
+            (i, best_j, best_s)
+        })
+        .collect()
+}
+
+fn greedy_assign(
+    old_best: &mut [(usize, i32, f64)],
+    old_names: &[String],
+    new_names: &[String],
+    match_threshold: f64,
+    change_threshold: f64,
+) -> (Vec<(String, String, f64, String)>, FxHashSet<usize>) {
+    let mut results = Vec::new();
+    let mut used_new: FxHashSet<usize> = FxHashSet::default();
+
+    old_best.sort_by(|a, b| b.2.partial_cmp(&a.2).unwrap());
+
+    for &(i, best_j, best_s) in old_best.iter() {
+        if best_j >= 0 && !used_new.contains(&(best_j as usize)) && best_s >= change_threshold {
+            used_new.insert(best_j as usize);
+            let nn = new_names[best_j as usize].clone();
+            let status = if best_s >= match_threshold {
+                "MATCH"
+            } else {
+                "CHANGED"
+            };
+            results.push((old_names[i].clone(), nn, best_s, status.to_string()));
+        } else {
+            results.push((
+                old_names[i].clone(),
+                "---".to_string(),
+                0.0,
+                "REMOVED".to_string(),
+            ));
+        }
+    }
+
+    for (j, nn) in new_names.iter().enumerate() {
+        if !used_new.contains(&j) {
+            results.push(("---".to_string(), nn.clone(), 0.0, "NEW".to_string()));
+        }
+    }
+
+    (results, used_new)
+}
+
 /// Greedy bipartite matching between old and new packages based on WL
 /// histogram similarity.  Results are labelled `MATCH`, `CHANGED`,
 /// `REMOVED`, or `NEW` depending on `match_threshold` and
@@ -509,71 +698,120 @@ fn compute_sigs_and_names(
 /// by the histogram kernel and the consistency check only refines the final
 /// score.
 pub fn match_packages(
-    old: SideData,
-    new: SideData,
+    old: &SideData,
+    new: &SideData,
     match_threshold: f64,
     change_threshold: f64,
     use_node_matching: bool,
+    api_weight: f64,
+    hier_weight: f64,
+    old_parents: &FxHashMap<String, Vec<String>>,
+    new_parents: &FxHashMap<String, Vec<String>>,
 ) -> Vec<(String, String, f64, String)> {
-    let mut results: Vec<(String, String, f64, String)> = Vec::new();
-    let mut used_new: FxHashSet<usize> = FxHashSet::default();
-    let mut old_best: Vec<(usize, i32, f64)> = old
-        .names
-        .par_iter()
-        .enumerate()
-        .map(|(i, on)| {
-            let sig_a = &old.sigs[on];
-            let mut best_j = -1i32;
-            let mut best_s = 0.0f64;
-            for (j, nn) in new.names.iter().enumerate() {
-                let sig_b = &new.sigs[nn];
-                let s = wl_similarity(&sig_a.hists, &sig_b.hists);
-                if s > best_s {
-                    best_s = s;
-                    best_j = j as i32;
-                }
+    let wl_weight = 1.0 - api_weight;
+
+    let mut old_best = compute_scores(old, new, api_weight);
+
+    let (mut results, _) = if hier_weight <= 0.0 {
+        greedy_assign(
+            &mut old_best,
+            old.names,
+            new.names,
+            match_threshold,
+            change_threshold,
+        )
+    } else {
+        // Pass 1: initial greedy assignment
+        let (pass1_results, _) = greedy_assign(
+            &mut old_best,
+            old.names,
+            new.names,
+            match_threshold,
+            change_threshold,
+        );
+
+        // Build match map from pass 1 results
+        let mut match_map: FxHashMap<String, (String, f64)> = FxHashMap::default();
+        for (on, nn, score, status) in &pass1_results {
+            if status != "REMOVED" && status != "NEW" && *score > 0.0 {
+                match_map.insert(on.clone(), (nn.clone(), *score));
             }
-            (i, best_j, best_s)
-        })
-        .collect();
-
-    old_best.sort_by(|a, b| b.2.partial_cmp(&a.2).unwrap());
-
-    for &(i, best_j, best_s) in &old_best {
-        if best_j >= 0 && !used_new.contains(&(best_j as usize)) && best_s >= change_threshold {
-            used_new.insert(best_j as usize);
-            let nn = new.names[best_j as usize].clone();
-            let status = if best_s >= match_threshold {
-                "MATCH"
-            } else {
-                "CHANGED"
-            };
-            results.push((old.names[i].clone(), nn, best_s, status.to_string()));
-        } else {
-            results.push((
-                old.names[i].clone(),
-                "---".to_string(),
-                0.0,
-                "REMOVED".to_string(),
-            ));
         }
-    }
 
-    for (j, nn) in new.names.iter().enumerate() {
-        if !used_new.contains(&j) {
-            results.push(("---".to_string(), nn.clone(), 0.0, "NEW".to_string()));
-        }
-    }
+        // Pass 2: compute refined scores with hierarchical consistency bonus
+        let mut old_best_refined: Vec<(usize, i32, f64)> = old
+            .names
+            .par_iter()
+            .enumerate()
+            .map(|(i, on)| {
+                let sig_a = &old.sigs[on];
+                let fp_a = old.api_fps.get(on);
+                let mut best_j = -1i32;
+                let mut best_s = 0.0f64;
+                for (j, nn) in new.names.iter().enumerate() {
+                    let sig_b = &new.sigs[nn];
+                    let fp_b = new.api_fps.get(nn);
+                    let s_wl = wl_similarity(&sig_a.hists, &sig_b.hists);
+                    let s_api = match (fp_a, fp_b) {
+                        (Some(a), Some(b)) => api_similarity(a, b),
+                        _ => 0.0,
+                    };
+                    let base_s = wl_weight * s_wl + api_weight * s_api;
+                    let hier_factor = if base_s > 0.0 {
+                        let n_consistent = ancestor_chain(on)
+                            .iter()
+                            .zip(ancestor_chain(nn).iter())
+                            .filter(|(oa, na)| {
+                                match_map.get(oa.as_str()).map(|(m, _)| m.as_str())
+                                    == Some(na.as_str())
+                            })
+                            .count();
+                        let n_levels = ancestor_chain(on)
+                            .len()
+                            .min(ancestor_chain(nn).len())
+                            .max(1);
+                        1.0 + hier_weight * (n_consistent as f64 / n_levels as f64)
+                    } else {
+                        1.0
+                    };
+                    let s = (base_s * hier_factor).min(1.0);
+                    if s > best_s {
+                        best_s = s;
+                        best_j = j as i32;
+                    }
+                }
+                (i, best_j, best_s)
+            })
+            .collect();
 
-    for name in old.no_graph {
-        if !results.iter().any(|r| &r.0 == name) {
-            results.push((name.clone(), "---".to_string(), 0.0, "REMOVED".to_string()));
+        greedy_assign(
+            &mut old_best_refined,
+            old.names,
+            new.names,
+            match_threshold,
+            change_threshold,
+        )
+    };
+
+    // Match no-graph packages using hierarchy context
+    {
+        let mut match_map: FxHashMap<String, (String, f64)> = FxHashMap::default();
+        let mut used_new_names: FxHashSet<&str> = FxHashSet::default();
+        for (on, nn, score, status) in &results {
+            if status != "REMOVED" && status != "NEW" && *score > 0.0 {
+                match_map.insert(on.clone(), (nn.clone(), *score));
+                used_new_names.insert(nn.as_str());
+            }
         }
-    }
-    for name in new.no_graph {
-        if !results.iter().any(|r| &r.1 == name) {
-            results.push(("---".to_string(), name.clone(), 0.0, "NEW".to_string()));
-        }
+        let empty_results = match_empty_packages(
+            old,
+            new,
+            old_parents,
+            new_parents,
+            &match_map,
+            &used_new_names,
+        );
+        results.extend(empty_results);
     }
 
     if use_node_matching {
@@ -594,6 +832,105 @@ pub fn match_packages(
     results
 }
 
+fn parent_path(pkg: &str) -> Option<String> {
+    pkg.rfind('/').map(|pos| pkg[..pos].to_string())
+}
+
+fn ancestor_chain(pkg: &str) -> Vec<String> {
+    let mut chain = Vec::new();
+    let mut current = parent_path(pkg);
+    while let Some(ref p) = current {
+        chain.push(p.clone());
+        current = parent_path(p);
+    }
+    chain
+}
+
+fn build_parent_map(names: &[String]) -> FxHashMap<String, Vec<String>> {
+    let mut map: FxHashMap<String, Vec<String>> = FxHashMap::default();
+    for name in names {
+        if let Some(parent) = parent_path(name) {
+            map.entry(parent).or_default().push(name.clone());
+        }
+    }
+    map
+}
+
+fn match_empty_packages(
+    old: &SideData,
+    new: &SideData,
+    _old_parent_map: &FxHashMap<String, Vec<String>>,
+    _new_parent_map: &FxHashMap<String, Vec<String>>,
+    match_map: &FxHashMap<String, (String, f64)>,
+    used_new_main: &FxHashSet<&str>,
+) -> Vec<(String, String, f64, String)> {
+    let mut results = Vec::new();
+    let mut used_old = FxHashSet::default();
+    let mut used_new = FxHashSet::default();
+
+    // All new package names; avoid re-matching packages already claimed in the main pass
+    let new_all: FxHashSet<&str> = new
+        .names
+        .iter()
+        .chain(new.no_graph.iter())
+        .filter(|n| !used_new_main.contains(n.as_str()))
+        .map(|s| s.as_str())
+        .collect();
+    for old_pkg in old.no_graph {
+        if match_map.contains_key(old_pkg) {
+            continue;
+        }
+        let old_parent = parent_path(old_pkg);
+
+        // Try to match old empty against new empties by same name or parent context
+        for new_pkg in new.no_graph {
+            if used_new.contains(new_pkg) {
+                continue;
+            }
+            let new_parent = parent_path(new_pkg);
+            if old_parent == new_parent {
+                if old_pkg == new_pkg {
+                    results.push((old_pkg.clone(), new_pkg.clone(), 1.0, "MATCH".to_string()));
+                    used_old.insert(old_pkg.clone());
+                    used_new.insert(new_pkg.clone());
+                    break;
+                } else if let (Some(op), Some(np)) = (&old_parent, &new_parent)
+                    && let Some((matched_new, _)) = match_map.get(op)
+                    && matched_new == np
+                {
+                    results.push((old_pkg.clone(), new_pkg.clone(), 1.0, "MATCH".to_string()));
+                    used_old.insert(old_pkg.clone());
+                    used_new.insert(new_pkg.clone());
+                    break;
+                }
+            }
+        }
+
+        // Fallback: match old empty against new packages WITH graphs by same name
+        if !used_old.contains(old_pkg) && new_all.contains(old_pkg.as_str()) {
+            results.push((old_pkg.clone(), old_pkg.clone(), 1.0, "MATCH".to_string()));
+            used_old.insert(old_pkg.clone());
+            used_new.insert(old_pkg.clone());
+        }
+
+        if !used_old.contains(old_pkg) {
+            results.push((
+                old_pkg.clone(),
+                "---".to_string(),
+                0.0,
+                "REMOVED".to_string(),
+            ));
+            used_old.insert(old_pkg.clone());
+        }
+    }
+    for new_pkg in new.no_graph {
+        if !used_new.contains(new_pkg) {
+            results.push(("---".to_string(), new_pkg.clone(), 0.0, "NEW".to_string()));
+        }
+    }
+    results
+}
+
 /// High-level entry point: build package graphs for both APKs, run WL
 /// matching, and return a `MatchResult` with similarity scores.
 pub fn run_match(
@@ -603,26 +940,54 @@ pub fn run_match(
     change_threshold: f64,
     wl_iterations: usize,
     use_node_matching: bool,
+    api_weight: f64,
+    hier_weight: f64,
 ) -> MatchResult {
-    let (old_data, old_method_counts) = build_package_graphs(old_classes);
-    let (new_data, new_method_counts) = build_package_graphs(new_classes);
+    let (old_data, old_method_counts, old_api_fps) = build_package_graphs(old_classes);
+    let (new_data, new_method_counts, new_api_fps) = build_package_graphs(new_classes);
     let (old_sigs, new_sigs, old_names, new_names, old_no_graph, new_no_graph) =
         compute_sigs_and_names(&old_data, &new_data, wl_iterations);
+
+    let old = SideData {
+        sigs: &old_sigs,
+        names: &old_names,
+        no_graph: &old_no_graph,
+        api_fps: &old_api_fps,
+    };
+    let new = SideData {
+        sigs: &new_sigs,
+        names: &new_names,
+        no_graph: &new_no_graph,
+        api_fps: &new_api_fps,
+    };
+
+    let all_old_names: Vec<String> = old
+        .names
+        .iter()
+        .chain(old.no_graph.iter())
+        .cloned()
+        .collect();
+    let all_new_names: Vec<String> = new
+        .names
+        .iter()
+        .chain(new.no_graph.iter())
+        .cloned()
+        .collect();
+    let old_parents = build_parent_map(&all_old_names);
+    let new_parents = build_parent_map(&all_new_names);
+
     let results = match_packages(
-        SideData {
-            sigs: &old_sigs,
-            names: &old_names,
-            no_graph: &old_no_graph,
-        },
-        SideData {
-            sigs: &new_sigs,
-            names: &new_names,
-            no_graph: &new_no_graph,
-        },
+        &old,
+        &new,
         match_threshold,
         change_threshold,
         use_node_matching,
+        api_weight,
+        hier_weight,
+        &old_parents,
+        &new_parents,
     );
+
     MatchResult {
         results,
         old_pkg_methods: old_method_counts,
@@ -752,15 +1117,15 @@ mod tests {
 
     #[test]
     fn test_hash_features_stable() {
-        let f1 = [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13];
-        let f2 = [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13];
+        let f1 = [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 0, 0, 0, 0, 0, 0];
+        let f2 = [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 0, 0, 0, 0, 0, 0];
         assert_eq!(hash_features(&f1), hash_features(&f2));
     }
 
     #[test]
     fn test_hash_features_different() {
-        let f1 = [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13];
-        let f2 = [0, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13];
+        let f1 = [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 0, 0, 0, 0, 0, 0];
+        let f2 = [0, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 0, 0, 0, 0, 0, 0];
         assert_ne!(hash_features(&f1), hash_features(&f2));
     }
 
@@ -826,11 +1191,18 @@ mod tests {
             annotations: vec![],
             ops: vec![],
         };
-        let (features, calls) = extract_method_features(&method, "com/example");
+        let (features, calls, api) = extract_method_features(&method, "com/example");
         assert_eq!(features[IDX_NUM_PARAMS], 0);
         assert_eq!(features[IDX_NUM_INSTRUCTIONS], 0);
         assert_eq!(features[IDX_OUT_DEGREE], 0);
+        assert_eq!(features[IDX_STRING_CONSTS], 0);
+        assert_eq!(features[IDX_FIELD_ACCESS], 0);
+        assert_eq!(features[IDX_TRY_CATCH], 0);
+        assert_eq!(features[IDX_REGISTER_COUNT], 0);
+        assert_eq!(features[IDX_IS_CONSTRUCTOR], 0);
+        assert_eq!(features[IDX_RETURN_TYPE], 0); // void return type
         assert!(calls.is_empty());
+        assert!(api.is_empty());
     }
 
     #[test]
@@ -853,12 +1225,19 @@ mod tests {
                 },
             })],
         };
-        let (features, calls) = extract_method_features(&method, "com/example");
+        let (features, calls, api) = extract_method_features(&method, "com/example");
         assert_eq!(features[IDX_INVOKE_VIRTUAL], 1);
         assert_eq!(features[IDX_NUM_INSTRUCTIONS], 1);
         assert_eq!(features[IDX_OUT_DEGREE], 1);
         assert_eq!(features[IDX_EXT_ANDROID], 1);
+        assert_eq!(features[IDX_STRING_CONSTS], 0);
+        assert_eq!(features[IDX_FIELD_ACCESS], 0);
+        assert_eq!(features[IDX_TRY_CATCH], 0);
+        assert_eq!(features[IDX_REGISTER_COUNT], 0);
+        assert_eq!(features[IDX_IS_CONSTRUCTOR], 0);
+        assert_eq!(features[IDX_RETURN_TYPE], 0); // void return type
         assert!(calls.is_empty()); // not internal to com/example
+        assert_eq!(api.len(), 1); // one external API call recorded
     }
 
     #[test]
@@ -882,10 +1261,11 @@ mod tests {
             })],
         };
         let pkg = "com/example";
-        let (features, calls) = extract_method_features(&method, pkg);
+        let (features, calls, api) = extract_method_features(&method, pkg);
         assert_eq!(features[IDX_INVOKE_STATIC], 1);
         assert_eq!(calls.len(), 1);
         assert!(calls[0].contains("internalMethod"));
+        assert!(api.is_empty()); // internal call, not external
     }
 
     #[test]
@@ -905,7 +1285,7 @@ mod tests {
                 offset: Label("L1".to_string()),
             })],
         };
-        let (features, _) = extract_method_features(&method, "com/example");
+        let (features, _, _) = extract_method_features(&method, "com/example");
         assert_eq!(features[IDX_HAS_BRANCHES], 1);
     }
 
@@ -931,7 +1311,7 @@ mod tests {
     #[test]
     fn test_wl_histograms_single_node() {
         let adj = vec![vec![]];
-        let features = [[1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]];
+        let features = [[1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]];
         let sig = wl_histograms(&adj, &features, 2);
         assert_eq!(sig.hists.len(), 3); // 0, 1, 2 iterations
         for hist in &sig.hists {
@@ -943,8 +1323,8 @@ mod tests {
     fn test_wl_histograms_two_nodes() {
         let adj = vec![vec![1], vec![0]];
         let features = [
-            [1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0],
-            [2, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0],
+            [1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0],
+            [2, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0],
         ];
         let sig = wl_histograms(&adj, &features, 1);
         assert_eq!(sig.hists.len(), 2);
@@ -976,20 +1356,29 @@ mod tests {
         .collect();
         let old_names = vec!["pkgA".to_string()];
         let new_names = vec!["pkgA".to_string()];
+        let empty_fps: ApiFingerprints = FxHashMap::default();
+        let old_sd = SideData {
+            sigs: &old_sigs,
+            names: &old_names,
+            no_graph: &[],
+            api_fps: &empty_fps,
+        };
+        let new_sd = SideData {
+            sigs: &new_sigs,
+            names: &new_names,
+            no_graph: &[],
+            api_fps: &empty_fps,
+        };
         let results = match_packages(
-            SideData {
-                sigs: &old_sigs,
-                names: &old_names,
-                no_graph: &[],
-            },
-            SideData {
-                sigs: &new_sigs,
-                names: &new_names,
-                no_graph: &[],
-            },
+            &old_sd,
+            &new_sd,
             0.8,
             0.0,
             false,
+            0.0,
+            0.0,
+            &FxHashMap::default(),
+            &FxHashMap::default(),
         );
         assert_eq!(results.len(), 1);
         assert_eq!(results[0].0, "pkgA");
@@ -1012,20 +1401,29 @@ mod tests {
         let new_sigs: SigsMap = FxHashMap::default();
         let old_names = vec!["pkgOld".to_string()];
         let new_names: Vec<String> = vec![];
+        let empty_fps: ApiFingerprints = FxHashMap::default();
+        let old_sd = SideData {
+            sigs: &old_sigs,
+            names: &old_names,
+            no_graph: &[],
+            api_fps: &empty_fps,
+        };
+        let new_sd = SideData {
+            sigs: &new_sigs,
+            names: &new_names,
+            no_graph: &[],
+            api_fps: &empty_fps,
+        };
         let results = match_packages(
-            SideData {
-                sigs: &old_sigs,
-                names: &old_names,
-                no_graph: &[],
-            },
-            SideData {
-                sigs: &new_sigs,
-                names: &new_names,
-                no_graph: &[],
-            },
+            &old_sd,
+            &new_sd,
             0.8,
             0.0,
             false,
+            0.0,
+            0.0,
+            &FxHashMap::default(),
+            &FxHashMap::default(),
         );
         assert_eq!(results.len(), 1);
         assert_eq!(results[0].3, "REMOVED");
@@ -1046,20 +1444,29 @@ mod tests {
         .collect();
         let old_names: Vec<String> = vec![];
         let new_names = vec!["pkgNew".to_string()];
+        let empty_fps: ApiFingerprints = FxHashMap::default();
+        let old_sd = SideData {
+            sigs: &old_sigs,
+            names: &old_names,
+            no_graph: &[],
+            api_fps: &empty_fps,
+        };
+        let new_sd = SideData {
+            sigs: &new_sigs,
+            names: &new_names,
+            no_graph: &[],
+            api_fps: &empty_fps,
+        };
         let results = match_packages(
-            SideData {
-                sigs: &old_sigs,
-                names: &old_names,
-                no_graph: &[],
-            },
-            SideData {
-                sigs: &new_sigs,
-                names: &new_names,
-                no_graph: &[],
-            },
+            &old_sd,
+            &new_sd,
             0.8,
             0.0,
             false,
+            0.0,
+            0.0,
+            &FxHashMap::default(),
+            &FxHashMap::default(),
         );
         assert_eq!(results.len(), 1);
         assert_eq!(results[0].3, "NEW");
@@ -1067,20 +1474,29 @@ mod tests {
 
     #[test]
     fn test_match_packages_no_graph() {
+        let empty_fps: ApiFingerprints = FxHashMap::default();
+        let old_sd = SideData {
+            sigs: &FxHashMap::default(),
+            names: &[],
+            no_graph: &["pkgEmpty".to_string()],
+            api_fps: &empty_fps,
+        };
+        let new_sd = SideData {
+            sigs: &FxHashMap::default(),
+            names: &[],
+            no_graph: &[],
+            api_fps: &empty_fps,
+        };
         let results = match_packages(
-            SideData {
-                sigs: &FxHashMap::default(),
-                names: &[],
-                no_graph: &["pkgEmpty".to_string()],
-            },
-            SideData {
-                sigs: &FxHashMap::default(),
-                names: &[],
-                no_graph: &[],
-            },
+            &old_sd,
+            &new_sd,
             0.8,
             0.0,
             false,
+            0.0,
+            0.0,
+            &FxHashMap::default(),
+            &FxHashMap::default(),
         );
         assert!(
             results

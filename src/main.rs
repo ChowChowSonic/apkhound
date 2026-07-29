@@ -70,6 +70,12 @@ enum Commands {
         /// Enable node-label consistency check for more precise matching
         #[arg(long = "node-matching", default_value_t = false)]
         node_matching: bool,
+        /// Weight of API-call fingerprint in combined score (0.0 = pure WL, 1.0 = pure API)
+        #[arg(long = "api-weight", default_value_t = 0.2)]
+        api_weight: f64,
+        /// Weight of hierarchical ancestor-consistency bonus (0.0 = disabled)
+        #[arg(long = "hier-weight", default_value_t = 0.7)]
+        hier_weight: f64,
     },
     /// Compare manifest permissions between two APKs, or list permissions of one
     Permissions {
@@ -121,6 +127,8 @@ fn main() {
             show_details,
             filters,
             node_matching,
+            api_weight,
+            hier_weight,
         } => commands::match_cmd::handle_match(
             old_apk,
             new_apk,
@@ -132,6 +140,8 @@ fn main() {
                 show_details,
                 filters,
                 use_node_matching: node_matching,
+                api_weight,
+                hier_weight,
             },
         ),
         Commands::Permissions { old_apk, new_apk } => {
