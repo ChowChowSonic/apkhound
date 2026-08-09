@@ -1,4 +1,4 @@
-use apkhound::commands;
+use apkhound::commands::{self, manifest::Format};
 use clap::Parser;
 use std::path::PathBuf;
 
@@ -42,6 +42,17 @@ enum Commands {
         #[arg(short = 's', long = "filtersmali")]
         smali_filters: Vec<String>,
     },
+    /// Trace call paths between methods matching two regexes
+    Trace {
+        /// Regex matching source method signatures (class:method)
+        src_regex: String,
+        /// Regex matching destination method signatures (class:method)
+        dest_regex: String,
+        #[arg(value_enum, short = 'f', long = "format", default_value_t = commands::manifest::Format::Printed)]
+        format: Format,
+        /// Paths to the APK files
+        apks: Vec<PathBuf>,
+    },
     /// Match packages across two APKs using graph isomorphism
     #[command(name = "match")]
     Match {
@@ -53,10 +64,10 @@ enum Commands {
         #[arg(short = 't', long = "threshold", default_value_t = 0.8)]
         threshold: f64,
         /// Minimum similarity to consider two packages related
-        #[arg(long = "change-threshold", default_value_t = 0.0)]
+        #[arg(short = 'c', long = "change-threshold", default_value_t = 0.0)]
         change_threshold: f64,
         /// Number of Weisfeiler-Lehman refinement iterations
-        #[arg(long = "wl-iterations", default_value_t = 3)]
+        #[arg(short = 'i', long = "wl-iterations", default_value_t = 3)]
         wl_iterations: usize,
         /// Output in CSV format instead of a formatted table
         #[arg(long = "csv")]
@@ -68,7 +79,7 @@ enum Commands {
         #[arg(short = 'f', long = "filterclass")]
         filters: Vec<String>,
         /// Enable node-label consistency check for more precise matching
-        #[arg(long = "node-matching", default_value_t = false)]
+        #[arg(short = 'm', long = "node-matching", default_value_t = false)]
         node_matching: bool,
         /// Weight of API-call fingerprint in combined score (0.0 = pure WL, 1.0 = pure API)
         #[arg(long = "api-weight", default_value_t = 0.2)]
@@ -76,6 +87,9 @@ enum Commands {
         /// Weight of hierarchical ancestor-consistency bonus (0.0 = disabled)
         #[arg(long = "hier-weight", default_value_t = 0.7)]
         hier_weight: f64,
+        /// Weight of string-constant fingerprint in combined score (0.0 = disabled)
+        #[arg(long = "string-weight", default_value_t = 0.3)]
+        string_weight: f64,
     },
     /// Compare manifest permissions between two APKs, or list permissions of one
     Permissions {
@@ -117,6 +131,12 @@ fn main() {
             class_filters,
             smali_filters,
         ),
+        Commands::Trace {
+            src_regex,
+            dest_regex,
+            format,
+            apks,
+        } => commands::trace::handle_trace(src_regex, dest_regex, format, apks),
         Commands::Match {
             old_apk,
             new_apk,
@@ -129,6 +149,7 @@ fn main() {
             node_matching,
             api_weight,
             hier_weight,
+            string_weight,
         } => commands::match_cmd::handle_match(
             old_apk,
             new_apk,
@@ -142,6 +163,7 @@ fn main() {
                 use_node_matching: node_matching,
                 api_weight,
                 hier_weight,
+                string_weight,
             },
         ),
         Commands::Permissions { old_apk, new_apk } => {

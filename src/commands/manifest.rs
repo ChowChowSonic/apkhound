@@ -20,6 +20,7 @@ pub enum Format {
     Yaml,
     /// Raw XML.
     Xml,
+    CSV,
 }
 
 /// Extract the `AndroidManifest.xml` from an APK and print it in the
@@ -56,7 +57,7 @@ pub fn handle_manifest(apk_path: PathBuf, format: Format) -> Result<(), String> 
                 .map_err(|_| "failed to read manifest".to_string())?;
             println!("{}", yaml);
         }
-        Format::Printed => {
+        Format::Printed | Format::CSV => {
             let summary = ManifestSummary::from(&manifest);
             print!("{}", summary.to_printed());
         }

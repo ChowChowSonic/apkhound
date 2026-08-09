@@ -2,7 +2,7 @@
 //! between packages in two APKs and displays a results table or CSV.
 
 use crate::compare::unpack_apk_classes;
-use crate::matching::{MatchResult, pkg_display, run_match};
+use crate::matching::{MatchParams, MatchResult, pkg_display, run_match};
 use crate::utils::build_regex;
 use rayon::iter::{IntoParallelRefIterator, ParallelIterator};
 use regex::Regex;
@@ -21,6 +21,7 @@ pub struct MatchConfig {
     pub use_node_matching: bool,
     pub api_weight: f64,
     pub hier_weight: f64,
+    pub string_weight: f64,
 }
 
 /// Run package matching between two APKs and output the results as either a
@@ -37,20 +38,20 @@ pub fn handle_match(old_apk: PathBuf, new_apk: PathBuf, cfg: MatchConfig) -> Res
             let old_classes = unpack_apk_classes(old, &regex);
             let new_classes = unpack_apk_classes(new, &regex);
 
+            let match_params = MatchParams {
+                match_threshold: cfg.threshold,
+                change_threshold: cfg.change_threshold,
+                wl_iterations: cfg.wl_iterations,
+                use_node_matching: cfg.use_node_matching,
+                api_weight: cfg.api_weight,
+                hier_weight: cfg.hier_weight,
+                string_weight: cfg.string_weight,
+            };
             let MatchResult {
                 results,
                 old_pkg_methods,
                 new_pkg_methods,
-            } = run_match(
-                &old_classes,
-                &new_classes,
-                cfg.threshold,
-                cfg.change_threshold,
-                cfg.wl_iterations,
-                cfg.use_node_matching,
-                cfg.api_weight,
-                cfg.hier_weight,
-            );
+            } = run_match(&old_classes, &new_classes, &match_params);
 
             if cfg.csv {
                 println!("old_package,new_package,score,status");

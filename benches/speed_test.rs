@@ -18,6 +18,7 @@ fn bench_run_match(c: &mut Criterion) {
         use_node_matching: true,
         api_weight: 0.2,
         hier_weight: 0.7,
+        string_weight: 0.3,
     };
 
     let mut group = c.benchmark_group("run_match");

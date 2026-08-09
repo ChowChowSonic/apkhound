@@ -241,6 +241,64 @@ fn test_extract() {
 }
 
 #[test]
+fn test_trace() {
+    let apk = apk_path("org.videolan.vlc_3.7.1.apk");
+    if apk.is_none() {
+        eprintln!("skipping test_trace: APK not found");
+        return;
+    }
+    let output = Command::new(binary_path())
+        .arg("trace")
+        .arg("onCreate")
+        .arg("loadUrl|sendTextMessage")
+        .arg(apk.unwrap())
+        .output()
+        .expect("failed to run apkhound trace");
+    assert!(output.status.success());
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    if !stdout.is_empty() {
+        assert!(stdout.contains(" -> "));
+        assert!(!stdout.contains("<unknown>"));
+    }
+}
+
+#[test]
+fn test_trace_no_matches() {
+    let apk = apk_path("org.videolan.vlc_3.7.1.apk");
+    if apk.is_none() {
+        eprintln!("skipping test_trace_no_matches: APK not found");
+        return;
+    }
+    let output = Command::new(binary_path())
+        .arg("trace")
+        .arg("onCreate")
+        .arg("zzzNoSuchMethodzzz")
+        .arg(apk.unwrap())
+        .output()
+        .expect("failed to run apkhound trace (no matches)");
+    assert!(output.status.success());
+    assert!(String::from_utf8_lossy(&output.stdout).is_empty());
+}
+
+#[test]
+fn test_trace_invalid_regex() {
+    let apk = apk_path("org.videolan.vlc_3.7.1.apk");
+    if apk.is_none() {
+        eprintln!("skipping test_trace_invalid_regex: APK not found");
+        return;
+    }
+    let output = Command::new(binary_path())
+        .arg("trace")
+        .arg("(")
+        .arg("sendTextMessage")
+        .arg(apk.unwrap())
+        .output()
+        .expect("failed to run apkhound trace (invalid regex)");
+    // Invalid regexes abort with a nonzero exit status.
+    assert!(!output.status.success());
+}
+
+#[test]
 fn test_help() {
     let output = Command::new(binary_path())
         .arg("--help")
@@ -254,4 +312,5 @@ fn test_help() {
     assert!(stdout.contains("permissions"));
     assert!(stdout.contains("match"));
     assert!(stdout.contains("extract"));
+    assert!(stdout.contains("trace"));
 }

@@ -14,6 +14,21 @@ use smali::types::{SmaliClass, SmaliMethod, SmaliOp, TypeSignature};
 /// A count of how many times each WL label appears at a given iteration.
 pub type Histogram = FxHashMap<u64, usize>;
 
+/// A single matching result entry: (old_package, new_package, similarity_score, status).
+/// Status is one of `MATCH`, `CHANGED`, `REMOVED`, or `NEW`.
+pub type MatchEntry = (String, String, f64, String);
+
+/// Parameters that control the matching algorithm.
+pub struct MatchParams {
+    pub match_threshold: f64,
+    pub change_threshold: f64,
+    pub wl_iterations: usize,
+    pub use_node_matching: bool,
+    pub api_weight: f64,
+    pub hier_weight: f64,
+    pub string_weight: f64,
+}
+
 /// Bundles the WL histograms, per-node final labels, and adjacency of a
 /// single package, so the matching layer can optionally run a node-label
 /// consistency check in addition to histogram intersection.
@@ -35,11 +50,23 @@ pub struct ApiFingerprint {
 
 type ApiFingerprints = FxHashMap<String, ApiFingerprint>;
 
+/// String-constant fingerprint for a single package: the set of unique
+/// string literal values used by methods in this package.
+/// String values survive R8 obfuscation unchanged, making this a stable
+/// signal for matching packages across obfuscated and unobfuscated APKs.
+#[derive(Clone, Default)]
+pub struct StringFingerprint {
+    pub strings: FxHashSet<String>,
+}
+
+type StringFingerprints = FxHashMap<String, StringFingerprint>;
+
 pub struct SideData<'a> {
     pub sigs: &'a SigsMap,
     pub names: &'a [String],
     pub no_graph: &'a [String],
     pub api_fps: &'a ApiFingerprints,
+    pub string_fps: &'a StringFingerprints,
 }
 
 /// A directed call graph for a single package.
@@ -48,7 +75,7 @@ pub struct SideData<'a> {
 pub struct PackageGraph {
     /// Adjacency list: for each node, the indices of methods it calls.
     pub adjacency: Vec<Vec<usize>>,
-    /// 13-element feature vectors for each method node.
+    /// 19-element feature vectors for each method node.
     pub features: Vec<[i32; 19]>,
 }
 
@@ -56,7 +83,7 @@ pub struct PackageGraph {
 pub struct MatchResult {
     /// Each entry: `(old_package, new_package, similarity_score, status)`.
     /// Status is one of `MATCH`, `CHANGED`, `REMOVED`, or `NEW`.
-    pub results: Vec<(String, String, f64, String)>,
+    pub results: Vec<MatchEntry>,
     /// Number of methods per package in the old APK.
     pub old_pkg_methods: FxHashMap<String, usize>,
     /// Number of methods per package in the new APK.
@@ -147,17 +174,15 @@ fn is_branch_op(dop: &DexOp) -> bool {
             | DexOp::SparseSwitch { .. }
     )
 }
-
-fn extract_method_features(
-    method: &SmaliMethod,
-    package_name: &str,
-) -> ([i32; 19], Vec<String>, Vec<(String, String)>) {
+type MethodFeatures = ([i32; 19], Vec<String>, Vec<(String, String)>, Vec<String>);
+fn extract_method_features(method: &SmaliMethod, package_name: &str) -> MethodFeatures {
     let mut features = [0i32; 19];
 
     features[IDX_NUM_PARAMS] = method.params.len() as i32;
 
     let mut internal_calls: Vec<String> = Vec::new();
     let mut api_calls: Vec<(String, String)> = Vec::new();
+    let mut method_strings: Vec<String> = Vec::new();
     let mut out_degree = 0i32;
     let mut num_instructions = 0i32;
     let mut has_branches = 0i32;
@@ -185,11 +210,12 @@ fn extract_method_features(
             has_branches = 1;
         }
 
-        if matches!(
-            dop,
-            DexOp::ConstString { .. } | DexOp::ConstStringJumbo { .. }
-        ) {
-            string_consts += 1;
+        match dop {
+            DexOp::ConstString { value, .. } | DexOp::ConstStringJumbo { value, .. } => {
+                string_consts += 1;
+                method_strings.push(value.clone());
+            }
+            _ => {}
         }
 
         if matches!(
@@ -297,7 +323,7 @@ fn extract_method_features(
         _ => 2,
     };
 
-    (features, internal_calls, api_calls)
+    (features, internal_calls, api_calls, method_strings)
 }
 
 fn is_primitive_type(ts: &TypeSignature) -> bool {
@@ -323,6 +349,7 @@ pub fn build_package_graphs(
     FxHashMap<String, Option<PackageGraph>>,
     FxHashMap<String, usize>,
     ApiFingerprints,
+    StringFingerprints,
 ) {
     let mut pkgs: FxHashMap<String, Vec<&SmaliClass>> = FxHashMap::default();
     for c in classes {
@@ -335,6 +362,7 @@ pub fn build_package_graphs(
     let mut method_counts: FxHashMap<String, usize> = FxHashMap::default();
     let mut graph_data: FxHashMap<String, Option<PackageGraph>> = FxHashMap::default();
     let mut api_fingerprints: ApiFingerprints = FxHashMap::default();
+    let mut string_fingerprints: StringFingerprints = FxHashMap::default();
     for (pkg, cls_list) in &pkgs {
         let total_methods: usize = cls_list.iter().map(|c| c.methods.len()).sum();
         method_counts.insert((*pkg).clone(), total_methods);
@@ -351,6 +379,7 @@ pub fn build_package_graphs(
         if methods.is_empty() {
             graph_data.insert((*pkg).clone(), None);
             api_fingerprints.insert((*pkg).clone(), ApiFingerprint::default());
+            string_fingerprints.insert((*pkg).clone(), StringFingerprint::default());
             continue;
         }
 
@@ -364,10 +393,12 @@ pub fn build_package_graphs(
         let mut adjacency: Vec<Vec<usize>> = vec![Vec::new(); node_count];
         let mut features: Vec<[i32; 19]> = Vec::with_capacity(node_count);
         let mut pkg_api_calls: FxHashSet<(String, String)> = FxHashSet::default();
+        let mut pkg_strings: FxHashSet<String> = FxHashSet::default();
 
         for (key, method) in &methods {
             let i = method_ids[key.as_str()];
-            let (feats, internal_calls, api_calls) = extract_method_features(method, pkg);
+            let (feats, internal_calls, api_calls, method_strings) =
+                extract_method_features(method, pkg);
             for callee_key in &internal_calls {
                 if let Some(&j) = method_ids.get(callee_key.as_str()) {
                     adjacency[i].push(j);
@@ -376,6 +407,9 @@ pub fn build_package_graphs(
             features.push(feats);
             for (class, method_name) in api_calls {
                 pkg_api_calls.insert((class, method_name));
+            }
+            for s in method_strings {
+                pkg_strings.insert(s);
             }
         }
 
@@ -402,9 +436,20 @@ pub fn build_package_graphs(
                 api_calls: pkg_api_calls,
             },
         );
+        string_fingerprints.insert(
+            (*pkg).clone(),
+            StringFingerprint {
+                strings: pkg_strings,
+            },
+        );
     }
 
-    (graph_data, method_counts, api_fingerprints)
+    (
+        graph_data,
+        method_counts,
+        api_fingerprints,
+        string_fingerprints,
+    )
 }
 
 fn build_neighborhoods(adj: &[Vec<usize>]) -> Vec<Vec<usize>> {
@@ -498,6 +543,21 @@ fn api_similarity(a: &ApiFingerprint, b: &ApiFingerprint) -> f64 {
     let union = a.api_calls.union(&b.api_calls).count();
     if union == 0 {
         // Both packages have no external API calls — they're equivalent in API space
+        1.0
+    } else {
+        intersection as f64 / union as f64
+    }
+}
+
+/// Compute Jaccard similarity between two string-constant fingerprints.
+/// A score of 1.0 means both packages use exactly the same set of string
+/// literals; 0.0 means they share no strings.  String values survive R8
+/// obfuscation unchanged, making this a strong signal for cross-obfuscation
+/// matching.
+fn string_similarity(a: &StringFingerprint, b: &StringFingerprint) -> f64 {
+    let intersection = a.strings.intersection(&b.strings).count();
+    let union = a.strings.union(&b.strings).count();
+    if union == 0 {
         1.0
     } else {
         intersection as f64 / union as f64
@@ -617,25 +677,36 @@ fn compute_sigs_and_names(
     )
 }
 
-fn compute_scores(old: &SideData, new: &SideData, api_weight: f64) -> Vec<(usize, i32, f64)> {
-    let wl_weight = 1.0 - api_weight;
+fn compute_scores(
+    old: &SideData,
+    new: &SideData,
+    api_weight: f64,
+    string_weight: f64,
+) -> Vec<(usize, i32, f64)> {
+    let wl_weight = (1.0 - api_weight - string_weight).max(0.0);
     old.names
         .par_iter()
         .enumerate()
         .map(|(i, on)| {
             let sig_a = &old.sigs[on];
             let fp_a = old.api_fps.get(on);
+            let sfp_a = old.string_fps.get(on);
             let mut best_j = -1i32;
             let mut best_s = 0.0f64;
             for (j, nn) in new.names.iter().enumerate() {
                 let sig_b = &new.sigs[nn];
                 let fp_b = new.api_fps.get(nn);
+                let sfp_b = new.string_fps.get(nn);
                 let s_wl = wl_similarity(&sig_a.hists, &sig_b.hists);
                 let s_api = match (fp_a, fp_b) {
                     (Some(a), Some(b)) => api_similarity(a, b),
                     _ => 0.0,
                 };
-                let s = wl_weight * s_wl + api_weight * s_api;
+                let s_string = match (sfp_a, sfp_b) {
+                    (Some(a), Some(b)) => string_similarity(a, b),
+                    _ => 0.0,
+                };
+                let s = wl_weight * s_wl + api_weight * s_api + string_weight * s_string;
                 if s > best_s {
                     best_s = s;
                     best_j = j as i32;
@@ -652,15 +723,30 @@ fn greedy_assign(
     new_names: &[String],
     match_threshold: f64,
     change_threshold: f64,
-) -> (Vec<(String, String, f64, String)>, FxHashSet<usize>) {
+    allow_default_many: bool,
+) -> (Vec<MatchEntry>, FxHashSet<usize>) {
     let mut results = Vec::new();
     let mut used_new: FxHashSet<usize> = FxHashSet::default();
 
     old_best.sort_by(|a, b| b.2.partial_cmp(&a.2).unwrap());
 
     for &(i, best_j, best_s) in old_best.iter() {
-        if best_j >= 0 && !used_new.contains(&(best_j as usize)) && best_s >= change_threshold {
-            used_new.insert(best_j as usize);
+        let can_assign = if best_j >= 0 && best_s >= change_threshold {
+            let is_default = new_names[best_j as usize].is_empty();
+            if is_default && allow_default_many {
+                true
+            } else {
+                !used_new.contains(&(best_j as usize))
+            }
+        } else {
+            false
+        };
+
+        if can_assign {
+            let is_default = new_names[best_j as usize].is_empty();
+            if !is_default || !allow_default_many {
+                used_new.insert(best_j as usize);
+            }
             let nn = new_names[best_j as usize].clone();
             let status = if best_s >= match_threshold {
                 "MATCH"
@@ -700,25 +786,23 @@ fn greedy_assign(
 pub fn match_packages(
     old: &SideData,
     new: &SideData,
-    match_threshold: f64,
-    change_threshold: f64,
-    use_node_matching: bool,
-    api_weight: f64,
-    hier_weight: f64,
+    params: &MatchParams,
     old_parents: &FxHashMap<String, Vec<String>>,
     new_parents: &FxHashMap<String, Vec<String>>,
-) -> Vec<(String, String, f64, String)> {
-    let wl_weight = 1.0 - api_weight;
+) -> Vec<MatchEntry> {
+    let string_weight = params.string_weight;
+    let wl_weight = (1.0 - params.api_weight - string_weight).max(0.0);
 
-    let mut old_best = compute_scores(old, new, api_weight);
+    let mut old_best = compute_scores(old, new, params.api_weight, string_weight);
 
-    let (mut results, _) = if hier_weight <= 0.0 {
+    let (mut results, _) = if params.hier_weight <= 0.0 {
         greedy_assign(
             &mut old_best,
             old.names,
             new.names,
-            match_threshold,
-            change_threshold,
+            params.match_threshold,
+            params.change_threshold,
+            true,
         )
     } else {
         // Pass 1: initial greedy assignment
@@ -726,8 +810,9 @@ pub fn match_packages(
             &mut old_best,
             old.names,
             new.names,
-            match_threshold,
-            change_threshold,
+            params.match_threshold,
+            params.change_threshold,
+            true,
         );
 
         // Build match map from pass 1 results
@@ -746,17 +831,24 @@ pub fn match_packages(
             .map(|(i, on)| {
                 let sig_a = &old.sigs[on];
                 let fp_a = old.api_fps.get(on);
+                let sfp_a = old.string_fps.get(on);
                 let mut best_j = -1i32;
                 let mut best_s = 0.0f64;
                 for (j, nn) in new.names.iter().enumerate() {
                     let sig_b = &new.sigs[nn];
                     let fp_b = new.api_fps.get(nn);
+                    let sfp_b = new.string_fps.get(nn);
                     let s_wl = wl_similarity(&sig_a.hists, &sig_b.hists);
                     let s_api = match (fp_a, fp_b) {
                         (Some(a), Some(b)) => api_similarity(a, b),
                         _ => 0.0,
                     };
-                    let base_s = wl_weight * s_wl + api_weight * s_api;
+                    let s_string = match (sfp_a, sfp_b) {
+                        (Some(a), Some(b)) => string_similarity(a, b),
+                        _ => 0.0,
+                    };
+                    let base_s =
+                        wl_weight * s_wl + params.api_weight * s_api + string_weight * s_string;
                     let hier_factor = if base_s > 0.0 {
                         let n_consistent = ancestor_chain(on)
                             .iter()
@@ -770,7 +862,7 @@ pub fn match_packages(
                             .len()
                             .min(ancestor_chain(nn).len())
                             .max(1);
-                        1.0 + hier_weight * (n_consistent as f64 / n_levels as f64)
+                        1.0 + params.hier_weight * (n_consistent as f64 / n_levels as f64)
                     } else {
                         1.0
                     };
@@ -788,8 +880,9 @@ pub fn match_packages(
             &mut old_best_refined,
             old.names,
             new.names,
-            match_threshold,
-            change_threshold,
+            params.match_threshold,
+            params.change_threshold,
+            true,
         )
     };
 
@@ -814,15 +907,15 @@ pub fn match_packages(
         results.extend(empty_results);
     }
 
-    if use_node_matching {
+    if params.use_node_matching {
         for (old_name, new_name, score, status) in &mut results {
             if (*status == "MATCH" || *status == "CHANGED")
                 && let (Some(sig_a), Some(sig_b)) = (old.sigs.get(old_name), new.sigs.get(new_name))
             {
                 *score *= node_label_consistency(sig_a, sig_b);
-                if *score < change_threshold {
+                if *score < params.change_threshold {
                     *status = "REMOVED".to_string();
-                } else if *score < match_threshold {
+                } else if *score < params.match_threshold {
                     *status = "CHANGED".to_string();
                 }
             }
@@ -863,7 +956,7 @@ fn match_empty_packages(
     _new_parent_map: &FxHashMap<String, Vec<String>>,
     match_map: &FxHashMap<String, (String, f64)>,
     used_new_main: &FxHashSet<&str>,
-) -> Vec<(String, String, f64, String)> {
+) -> Vec<MatchEntry> {
     let mut results = Vec::new();
     let mut used_old = FxHashSet::default();
     let mut used_new = FxHashSet::default();
@@ -936,29 +1029,28 @@ fn match_empty_packages(
 pub fn run_match(
     old_classes: &[SmaliClass],
     new_classes: &[SmaliClass],
-    match_threshold: f64,
-    change_threshold: f64,
-    wl_iterations: usize,
-    use_node_matching: bool,
-    api_weight: f64,
-    hier_weight: f64,
+    params: &MatchParams,
 ) -> MatchResult {
-    let (old_data, old_method_counts, old_api_fps) = build_package_graphs(old_classes);
-    let (new_data, new_method_counts, new_api_fps) = build_package_graphs(new_classes);
+    let (old_data, old_method_counts, old_api_fps, old_string_fps) =
+        build_package_graphs(old_classes);
+    let (new_data, new_method_counts, new_api_fps, new_string_fps) =
+        build_package_graphs(new_classes);
     let (old_sigs, new_sigs, old_names, new_names, old_no_graph, new_no_graph) =
-        compute_sigs_and_names(&old_data, &new_data, wl_iterations);
+        compute_sigs_and_names(&old_data, &new_data, params.wl_iterations);
 
     let old = SideData {
         sigs: &old_sigs,
         names: &old_names,
         no_graph: &old_no_graph,
         api_fps: &old_api_fps,
+        string_fps: &old_string_fps,
     };
     let new = SideData {
         sigs: &new_sigs,
         names: &new_names,
         no_graph: &new_no_graph,
         api_fps: &new_api_fps,
+        string_fps: &new_string_fps,
     };
 
     let all_old_names: Vec<String> = old
@@ -976,17 +1068,7 @@ pub fn run_match(
     let old_parents = build_parent_map(&all_old_names);
     let new_parents = build_parent_map(&all_new_names);
 
-    let results = match_packages(
-        &old,
-        &new,
-        match_threshold,
-        change_threshold,
-        use_node_matching,
-        api_weight,
-        hier_weight,
-        &old_parents,
-        &new_parents,
-    );
+    let results = match_packages(&old, &new, params, &old_parents, &new_parents);
 
     MatchResult {
         results,
@@ -1191,7 +1273,7 @@ mod tests {
             annotations: vec![],
             ops: vec![],
         };
-        let (features, calls, api) = extract_method_features(&method, "com/example");
+        let (features, calls, api, strings) = extract_method_features(&method, "com/example");
         assert_eq!(features[IDX_NUM_PARAMS], 0);
         assert_eq!(features[IDX_NUM_INSTRUCTIONS], 0);
         assert_eq!(features[IDX_OUT_DEGREE], 0);
@@ -1203,6 +1285,7 @@ mod tests {
         assert_eq!(features[IDX_RETURN_TYPE], 0); // void return type
         assert!(calls.is_empty());
         assert!(api.is_empty());
+        assert!(strings.is_empty());
     }
 
     #[test]
@@ -1225,7 +1308,7 @@ mod tests {
                 },
             })],
         };
-        let (features, calls, api) = extract_method_features(&method, "com/example");
+        let (features, calls, api, strings) = extract_method_features(&method, "com/example");
         assert_eq!(features[IDX_INVOKE_VIRTUAL], 1);
         assert_eq!(features[IDX_NUM_INSTRUCTIONS], 1);
         assert_eq!(features[IDX_OUT_DEGREE], 1);
@@ -1238,6 +1321,7 @@ mod tests {
         assert_eq!(features[IDX_RETURN_TYPE], 0); // void return type
         assert!(calls.is_empty()); // not internal to com/example
         assert_eq!(api.len(), 1); // one external API call recorded
+        assert!(strings.is_empty());
     }
 
     #[test]
@@ -1261,11 +1345,12 @@ mod tests {
             })],
         };
         let pkg = "com/example";
-        let (features, calls, api) = extract_method_features(&method, pkg);
+        let (features, calls, api, strings) = extract_method_features(&method, pkg);
         assert_eq!(features[IDX_INVOKE_STATIC], 1);
         assert_eq!(calls.len(), 1);
         assert!(calls[0].contains("internalMethod"));
         assert!(api.is_empty()); // internal call, not external
+        assert!(strings.is_empty());
     }
 
     #[test]
@@ -1285,7 +1370,7 @@ mod tests {
                 offset: Label("L1".to_string()),
             })],
         };
-        let (features, _, _) = extract_method_features(&method, "com/example");
+        let (features, _, _, _) = extract_method_features(&method, "com/example");
         assert_eq!(features[IDX_HAS_BRANCHES], 1);
     }
 
@@ -1357,26 +1442,34 @@ mod tests {
         let old_names = vec!["pkgA".to_string()];
         let new_names = vec!["pkgA".to_string()];
         let empty_fps: ApiFingerprints = FxHashMap::default();
+        let empty_sfps: StringFingerprints = FxHashMap::default();
         let old_sd = SideData {
             sigs: &old_sigs,
             names: &old_names,
             no_graph: &[],
             api_fps: &empty_fps,
+            string_fps: &empty_sfps,
         };
         let new_sd = SideData {
             sigs: &new_sigs,
             names: &new_names,
             no_graph: &[],
             api_fps: &empty_fps,
+            string_fps: &empty_sfps,
+        };
+        let params = MatchParams {
+            match_threshold: 0.8,
+            change_threshold: 0.0,
+            wl_iterations: 0,
+            use_node_matching: false,
+            api_weight: 0.0,
+            hier_weight: 0.0,
+            string_weight: 0.0,
         };
         let results = match_packages(
             &old_sd,
             &new_sd,
-            0.8,
-            0.0,
-            false,
-            0.0,
-            0.0,
+            &params,
             &FxHashMap::default(),
             &FxHashMap::default(),
         );
@@ -1402,26 +1495,34 @@ mod tests {
         let old_names = vec!["pkgOld".to_string()];
         let new_names: Vec<String> = vec![];
         let empty_fps: ApiFingerprints = FxHashMap::default();
+        let empty_sfps: StringFingerprints = FxHashMap::default();
         let old_sd = SideData {
             sigs: &old_sigs,
             names: &old_names,
             no_graph: &[],
             api_fps: &empty_fps,
+            string_fps: &empty_sfps,
         };
         let new_sd = SideData {
             sigs: &new_sigs,
             names: &new_names,
             no_graph: &[],
             api_fps: &empty_fps,
+            string_fps: &empty_sfps,
+        };
+        let params = MatchParams {
+            match_threshold: 0.8,
+            change_threshold: 0.0,
+            wl_iterations: 0,
+            use_node_matching: false,
+            api_weight: 0.0,
+            hier_weight: 0.0,
+            string_weight: 0.0,
         };
         let results = match_packages(
             &old_sd,
             &new_sd,
-            0.8,
-            0.0,
-            false,
-            0.0,
-            0.0,
+            &params,
             &FxHashMap::default(),
             &FxHashMap::default(),
         );
@@ -1445,26 +1546,34 @@ mod tests {
         let old_names: Vec<String> = vec![];
         let new_names = vec!["pkgNew".to_string()];
         let empty_fps: ApiFingerprints = FxHashMap::default();
+        let empty_sfps: StringFingerprints = FxHashMap::default();
         let old_sd = SideData {
             sigs: &old_sigs,
             names: &old_names,
             no_graph: &[],
             api_fps: &empty_fps,
+            string_fps: &empty_sfps,
         };
         let new_sd = SideData {
             sigs: &new_sigs,
             names: &new_names,
             no_graph: &[],
             api_fps: &empty_fps,
+            string_fps: &empty_sfps,
+        };
+        let params = MatchParams {
+            match_threshold: 0.8,
+            change_threshold: 0.0,
+            wl_iterations: 0,
+            use_node_matching: false,
+            api_weight: 0.0,
+            hier_weight: 0.0,
+            string_weight: 0.0,
         };
         let results = match_packages(
             &old_sd,
             &new_sd,
-            0.8,
-            0.0,
-            false,
-            0.0,
-            0.0,
+            &params,
             &FxHashMap::default(),
             &FxHashMap::default(),
         );
@@ -1475,26 +1584,34 @@ mod tests {
     #[test]
     fn test_match_packages_no_graph() {
         let empty_fps: ApiFingerprints = FxHashMap::default();
+        let empty_sfps: StringFingerprints = FxHashMap::default();
         let old_sd = SideData {
             sigs: &FxHashMap::default(),
             names: &[],
             no_graph: &["pkgEmpty".to_string()],
             api_fps: &empty_fps,
+            string_fps: &empty_sfps,
         };
         let new_sd = SideData {
             sigs: &FxHashMap::default(),
             names: &[],
             no_graph: &[],
             api_fps: &empty_fps,
+            string_fps: &empty_sfps,
+        };
+        let params = MatchParams {
+            match_threshold: 0.8,
+            change_threshold: 0.0,
+            wl_iterations: 0,
+            use_node_matching: false,
+            api_weight: 0.0,
+            hier_weight: 0.0,
+            string_weight: 0.0,
         };
         let results = match_packages(
             &old_sd,
             &new_sd,
-            0.8,
-            0.0,
-            false,
-            0.0,
-            0.0,
+            &params,
             &FxHashMap::default(),
             &FxHashMap::default(),
         );

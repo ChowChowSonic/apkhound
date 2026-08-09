@@ -21,9 +21,10 @@
 ## Features
 
 - **Call graph extraction** — Generate a Graphviz DOT digraph of method invocations across all DEX files in an APK.
+- **Call path tracing** — Find the shortest invocation paths between methods matching a source regex and methods matching a destination regex, e.g. from UI entry points to sensitive sinks.
 - **APK diffing** — Compare two APK versions at the method-signature level and list added, removed, and changed methods.
 - **Smali extraction** — Dump the smali source of changed/added/removed methods to disk for manual review.
-- **Graph kernel matching** — Match packages across APK versions using a Weisfeiler-Lehman (WL) graph kernel with configurable similarity thresholds and optional node-label consistency checking.
+- **Graph kernel matching** — Match packages across APK versions using a Weisfeiler-Lehman (WL) graph kernel blended with API-call fingerprint similarity, string-constant content fingerprints, hierarchical ancestor-consistency refinement, and empty-package matching with default-package collapse awareness. Configurable similarity thresholds and weighting controls.
 - **Permission diffing** — List or diff `uses-permission` entries between APK versions.
 - **Manifest inspection** — Extract and display `AndroidManifest.xml` in human-readable, JSON, YAML, or raw XML format.
 
@@ -48,6 +49,9 @@ apkhound match app-v1.0.apk app-v1.1.apk --show-details
 
 # Extract a filtered call graph
 apkhound callgraph app.apk -f "com.example" > graph.dot
+
+# Trace call paths from entry points to a sensitive sink
+apkhound trace "onCreate" "sendTextMessage|loadUrl" app.apk
 
 # Display the manifest
 apkhound manifest app.apk json
@@ -96,6 +100,27 @@ apkhound extract <old_apk> <new_apk> <output_dir> [-f <class_regex>...] [-s <sma
 
 Output: `<output_dir>/old/` and `<output_dir>/new/` mirroring the original directory structure. This output is best viewed with a tool like [ripdiff](https://github.com/ChowChowSonic/ripdiff) to more easily get a sense of what changed.
 
+### `trace`
+
+Find call paths from methods matching a source regex to methods matching a destination regex.
+
+```
+apkhound trace <src_regex> <dest_regex> <apk_path>...
+```
+
+Signatures are formatted as `class:method`, e.g. `com.example.MainActivity:onCreate`. Both regexes are matched with an unanchored search (`is_match`), so `"onCreate"` matches any `onCreate` method while `"^com\.example\.MainActivity:onCreate$"` pins the exact signature. Destinations may match any method mentioned in the graph — including framework methods that only appear as callees, such as `SmsManager:sendTextMessage` — not just methods declared in the APK.
+
+For every matching source, a single breadth-first search over the APK's call graph finds the shortest path to every reachable destination. Only paths that actually exist are printed:
+
+```
+com.example.MainActivity:onCreate -> android.telephony.SmsManager:sendTextMessage
+"com.example.MainActivity:onCreate"
+"com.example.internal.SmsHelper:send"
+"android.telephony.SmsManager:sendTextMessage"
+```
+
+When no paths are found the command prints a warning to stderr and exits successfully; nothing is printed to stdout.
+
 ### `match`
 
 Run the Weisfeiler-Lehman graph kernel matcher to find corresponding packages between two APK versions.
@@ -109,6 +134,9 @@ apkhound match <old_apk> <new_apk> [options]
 | `-t`, `--threshold` | `0.8` | Similarity score to consider packages a match |
 | `--change-threshold` | `0.0` | Minimum similarity to consider packages related |
 | `--wl-iterations` | `3` | Number of WL label-refinement iterations |
+| `--api-weight` | `0.2` | Weight of API-call fingerprint similarity in the combined score (0 = pure WL, 1 = pure API) |
+| `--string-weight` | `0.3` | Weight of string-constant content fingerprint similarity (added to base score; 0 = disabled) |
+| `--hier-weight` | `0.7` | Weight of hierarchical ancestor-consistency boost applied after flat matching |
 | `--csv` | `false` | Output as CSV instead of a formatted table |
 | `-d`, `--show-details` | `false` | Show per-package method counts |
 | `--node-matching` | `false` | Enable node-label consistency check for more precise matching |
@@ -151,6 +179,10 @@ APK files are parsed using the [`smali`](https://crates.io/crates/smali) crate, 
 
 For every method in every DEX file, every `invoke-*` opcode is extracted to build a `HashMap<caller_signature, Vec<callee_signature>>`. The result is emitted as a Graphviz DOT digraph.
 
+### Call Path Tracing
+
+The `trace` command searches the call graph for invocation paths from methods matching a source regex to methods matching a destination regex. Sources must be graph keys (methods that make calls), while destinations can be any method mentioned in the graph — including callee-only nodes such as framework sinks. A single BFS per source records parent pointers, so the shortest path to every reachable destination is reconstructed from one traversal instead of one traversal per pair.
+
 ### Method-Level Diffing
 
 Methods are identified by their full Java signature (class name + method name + parameter types). Between two APK versions, the tool classifies each method as:
@@ -160,20 +192,42 @@ Methods are identified by their full Java signature (class name + method name + 
 
 ### Weisfeiler-Lehman Graph Kernel Matching
 
-The core innovation — packages from two APK versions are matched using graph isomorphism via the WL kernel:
+Packages from two APK versions are matched using a multi-component similarity pipeline:
 
-1. **Feature extraction**: Each method is represented by a 13-dimensional feature vector:
-   `[in_degree, out_degree, ext_android, ext_java, ext_kotlin, ext_other, invoke_virtual, invoke_static, invoke_direct, invoke_interface, num_params, num_instructions, has_branches]`
+1. **Feature extraction**: Each method is represented by a 19-dimensional feature vector:
+   `[in_degree, out_degree, ext_android, ext_java, ext_kotlin, ext_other, invoke_virtual, invoke_static, invoke_direct, invoke_interface, num_params, num_instructions, has_branches, string_consts, field_access, try_catch, register_count, is_constructor, return_type]`
+   String-constant *values* are also collected into a per-package set for content fingerprinting.
 
 2. **Graph construction**: Methods within a package become nodes; intra-package call edges connect them.
 
 3. **WL refinement**: Each node's label is iteratively combined with its neighbors' labels and hashed, producing a multi-level histogram signature for each package.
 
-4. **Similarity scoring**: Histogram intersection across all WL iterations yields a score: `min(cross) / sqrt(self_a × self_b)`.
+4. **WL similarity scoring**: Histogram intersection across all WL iterations yields a score: `min(cross) / sqrt(self_a × self_b)`.
 
-5. **Bipartite matching**: Old packages are greedily matched to new packages by best similarity score.
+5. **API fingerprint similarity**: Each package records the set of external API calls it makes (class + method name pairs). Since framework and library classes are never renamed by obfuscators, these fingerprints survive renaming. The similarity between two packages is computed as Jaccard similarity over their API-call sets.
 
-6. **Node-label consistency** (optional): After histogram matching, re-scores each pair by comparing per-node `(label, sorted_neighbor_labels)` tuples for more precise matching.
+6. **String-constant content fingerprint**: Each package collects the literal string values referenced in its methods (e.g., URLs, log tags, error messages). Since R8 keeps string content intact during obfuscation, these serve as a stable signal. Similarity is Jaccard over the two packages' string sets, weighted by `--string-weight`.
+
+7. **Combined scoring**: The final score blends WL, API, and string similarity, then optionally boosts via hierarchical consistency:
+   ```
+   base_score = (1 - api_weight) * s_wl + api_weight * s_api
+   base_score += string_weight * s_string
+   final_score = min(base_score * (1.0 + hier_weight * hier_consistency), 1.0)
+   ```
+   Where `hier_consistency` measures agreement between the matched pair's ancestor package chains.
+
+8. **Two-pass bipartite matching**:
+   - **Pass 1**: Old packages are greedily matched to new packages by best base score.
+   - **Hierarchy boost**: Pass-1 results are used to compute ancestor-consistency scores for every candidate pair.
+   - **Pass 2**: Matching is re-run with the boosted final scores, improving same-package-name and sibling-package matches.
+
+9. **Node-label consistency** (optional): After histogram matching, re-scores each pair by comparing per-node `(label, sorted_neighbor_labels)` tuples for more precise matching.
+
+10. **Default-package collapse handling**: R8's obfuscation often flattens the majority of classes into the unnamed `(default)` package, which would otherwise cause false many-to-one matches. When the `(default)` package is a candidate, the bijective greedy assignment is relaxed, allowing multiple old packages to find their best new match there.
+
+11. **Empty-package matching**: Packages without graph content (no methods or no call edges) are matched by same package name against both empty and non-empty candidates. Unmatched packages are flagged as `REMOVED` or `NEW`.
+
+12. **Classification**: Each matched pair is classified as `MATCH` (score ≥ threshold), `CHANGED` (score > change-threshold), `REMOVED` (old package with no new match), or `NEW` (new package with no old match).
 
 ## Project Structure
 
@@ -198,15 +252,16 @@ The core innovation — packages from two APK versions are matched using graph i
 │       ├── extract.rs
 │       ├── manifest.rs
 │       ├── match_cmd.rs
-│       └── permissions.rs
+│       ├── permissions.rs
+│       └── trace.rs
 └── tests/
-    └── integration_test.rs     # 10 binary-level integration tests
+    └── integration_test.rs     # 14 binary-level integration tests
 ```
 
 ## Testing & Benchmarks
 
 ```bash
-# Unit tests (41 tests across lib modules)
+# Unit tests (90 tests across lib modules)
 cargo test --lib
 
 # Integration tests (requires VLC APKs — downloaded in CI)
