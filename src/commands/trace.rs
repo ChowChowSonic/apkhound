@@ -14,7 +14,7 @@ use regex::Regex;
 use rustc_hash::{FxHashMap, FxHashSet};
 use smali::android::zip::ApkFile;
 use std::collections::VecDeque;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use crate::callgraph::iterate_over_dex_files;
 use crate::commands::manifest::Format;
@@ -65,23 +65,24 @@ fn bfs_to_all(
     found
 }
 
-/// Find the shortest path from every method matching `starts` to every
-/// method matching `dests` (which may be a graph key or a callee-only
-/// node).  Runs one BFS per start, in parallel.
+/// Find the shortest path from every method matching any regex in `starts`
+/// to every method matching any regex in `dests` (which may be a graph key
+/// or a callee-only node).  Each node is checked against the regexes in
+/// parallel.  Runs one BFS per start, in parallel.
 fn multi_to_multi_bfs(
     map: &FxHashMap<String, Vec<String>>,
-    starts: &Regex,
-    dests: &Regex,
+    starts: &[Regex],
+    dests: &[Regex],
 ) -> Vec<Vec<String>> {
     let starts: Vec<String> = map
         .par_iter()
-        .filter(|(k, _v)| starts.is_match(k))
+        .filter(|(k, _v)| starts.par_iter().any(|re| re.is_match(k)))
         .map(|(k, _v)| k.clone())
         .collect();
     let dests: FxHashSet<String> = map
         .par_iter()
         .flat_map_iter(|(k, v)| std::iter::once(k.clone()).chain(v.iter().cloned()))
-        .filter(|n| dests.is_match(n))
+        .filter(|n| dests.par_iter().any(|re| re.is_match(n)))
         .collect();
     starts
         .par_iter()
@@ -161,35 +162,67 @@ fn format_paths(results: &[Vec<String>], format: Format) -> String {
     }
 }
 
-/// Find call paths from methods matching `start_regex` to methods matching
-/// `end_regex` across all given APKs, and print the results to stdout.
-/// Signatures are formatted as `class:method`, e.g.
-/// `com.example.MainActivity:onCreate`. Returns an error only when no APK
-/// can be read; a missing APK is silently skipped, and a search that finds
-/// nothing prints a warning to stderr and succeeds.
+/// Resolve the regexes for one side of a trace.  When `from_file` is `None`,
+/// the single positional pattern is kept as-is.  When a file is given, each
+/// non-empty trimmed line (with trailing carriage returns stripped) becomes
+/// one pattern, preserving the ability to check them in parallel later.
+/// Reading or an empty file is an error.
+fn resolve_patterns(pattern: &str, from_file: Option<&Path>) -> Result<Vec<String>, String> {
+    match from_file {
+        None => Ok(vec![pattern.to_string()]),
+        Some(path) => {
+            let content = std::fs::read_to_string(path)
+                .map_err(|e| format!("Failed to read {}: {}", path.display(), e))?;
+            let patterns: Vec<String> = content
+                .replace('\r', "")
+                .lines()
+                .map(str::trim)
+                .filter(|l| !l.is_empty())
+                .map(str::to_string)
+                .collect();
+            if patterns.is_empty() {
+                Err(format!("{} contains no non-empty regexes", path.display()))
+            } else {
+                Ok(patterns)
+            }
+        }
+    }
+}
+
+/// Compile every resolved pattern into a `Regex`.  An invalid pattern is a
+/// hard error: the process reports it and aborts, matching the previous
+/// behavior of a single positional regex.
+fn compile_patterns(patterns: &[String]) -> Vec<Regex> {
+    patterns
+        .iter()
+        .map(|p| {
+            Regex::new(p).unwrap_or_else(|e| {
+                tracing::error!("Error parsing regex {}: {}", p, e);
+                panic!("Failed to parse regex");
+            })
+        })
+        .collect()
+}
+
+/// Find call paths from methods matching any of the `start` regexes to
+/// methods matching any of the `end` regexes across all given APKs, and
+/// print the results to stdout.  Signatures are formatted as `class:method`,
+/// e.g. `com.example.MainActivity:onCreate`.  When a `*_from_file` path is
+/// given it overrides the corresponding positional regex. Returns an error
+/// only when no APK can be read; a missing APK is silently skipped, and a
+/// search that finds nothing prints a warning to stderr and succeeds.
 pub fn handle_trace(
     start_regex: String,
     end_regex: String,
+    src_from_file: Option<PathBuf>,
+    dest_from_file: Option<PathBuf>,
     format: Format,
     apks: Vec<PathBuf>,
 ) -> Result<(), String> {
-    let start_reg_result = Regex::new(&start_regex);
-    let start_reg = match start_reg_result {
-        Ok(e) => e,
-        Err(e) => {
-            tracing::error!("Error parsing regex {}: {}", start_regex, e);
-            panic!("Failed to parse regex");
-        }
-    };
-
-    let end_reg_result = Regex::new(&end_regex);
-    let end_reg = match end_reg_result {
-        Ok(e) => e,
-        Err(e) => {
-            tracing::error!("Error parsing regex {}: {}", end_regex, e);
-            panic!("Failed to parse regex");
-        }
-    };
+    let start_patterns = resolve_patterns(&start_regex, src_from_file.as_deref())?;
+    let end_patterns = resolve_patterns(&end_regex, dest_from_file.as_deref())?;
+    let start_regs = compile_patterns(&start_patterns);
+    let end_regs = compile_patterns(&end_patterns);
     let files: Vec<ApkFile> = apks
         .par_iter()
         .filter_map(|x| ApkFile::from_file(x).ok())
@@ -201,7 +234,7 @@ pub fn handle_trace(
     let results: Vec<Vec<String>> = start_maps
         .par_iter()
         .fold(Vec::<Vec<String>>::new, |mut cumulator, x| {
-            let t = multi_to_multi_bfs(x, &start_reg, &end_reg);
+            let t = multi_to_multi_bfs(x, &start_regs, &end_regs);
             cumulator.extend(t);
             cumulator
         })
@@ -210,7 +243,9 @@ pub fn handle_trace(
             accumulator
         });
     if results.is_empty() {
-        tracing::warn!("No paths found from {start_regex} to {end_regex}");
+        let start = start_patterns.join("|");
+        let end = end_patterns.join("|");
+        tracing::warn!("No paths found from {start} to {end}");
         return Ok(());
     }
     print!("{}", format_paths(&results, format));
@@ -303,7 +338,7 @@ mod tests {
         ]);
         let starts = Regex::new("Source").unwrap();
         let dests = Regex::new("Sink").unwrap();
-        let paths = multi_to_multi_bfs(&g, &starts, &dests);
+        let paths = multi_to_multi_bfs(&g, &[starts], &[dests]);
         assert_eq!(
             paths,
             vec![vec!["com.a.Source:x", "com.b.Mid:y", "com.c.Sink:z"]]
@@ -315,7 +350,7 @@ mod tests {
         let g = graph(&[("com.a.Source:x", &["com.b.Mid:y"])]);
         let starts = Regex::new("Source").unwrap();
         let dests = Regex::new("Sink").unwrap();
-        assert!(multi_to_multi_bfs(&g, &starts, &dests).is_empty());
+        assert!(multi_to_multi_bfs(&g, &[starts], &[dests]).is_empty());
     }
 
     #[test]
@@ -327,7 +362,7 @@ mod tests {
         ]);
         let starts = Regex::new("Source").unwrap();
         let dests = Regex::new("Sink|Other").unwrap();
-        let paths = multi_to_multi_bfs(&g, &starts, &dests);
+        let paths = multi_to_multi_bfs(&g, &[starts], &[dests]);
         assert_eq!(
             paths,
             vec![vec!["com.a.Source:x", "com.b.Mid:y", "com.c.Sink:z"]]
@@ -344,7 +379,7 @@ mod tests {
         ]);
         let starts = Regex::new("Source").unwrap();
         let dests = Regex::new("Sink|Other").unwrap();
-        let paths = multi_to_multi_bfs(&g, &starts, &dests);
+        let paths = multi_to_multi_bfs(&g, &[starts], &[dests]);
         assert_eq!(paths.len(), 2);
         assert!(paths.contains(&vec![
             "com.a.Source:x".to_string(),
@@ -425,7 +460,7 @@ mod tests {
         let g = graph(&[("com.a.Other:x", &["com.b.Mid:y"])]);
         let starts = Regex::new("Source").unwrap();
         let dests = Regex::new("Mid").unwrap();
-        assert!(multi_to_multi_bfs(&g, &starts, &dests).is_empty());
+        assert!(multi_to_multi_bfs(&g, &[starts], &[dests]).is_empty());
     }
 
     #[test]
@@ -437,7 +472,7 @@ mod tests {
         ]);
         let starts = Regex::new("Source").unwrap();
         let dests = Regex::new("Sink").unwrap();
-        let paths = multi_to_multi_bfs(&g, &starts, &dests);
+        let paths = multi_to_multi_bfs(&g, &[starts], &[dests]);
         assert_eq!(paths.len(), 2);
         assert!(paths.contains(&vec![
             "com.a.Source1:x".to_string(),
@@ -456,7 +491,7 @@ mod tests {
         let g = graph(&[("com.a.Source:x", &["com.b.Sink:y"])]);
         let starts = Regex::new("source").unwrap();
         let dests = Regex::new("sink").unwrap();
-        assert!(multi_to_multi_bfs(&g, &starts, &dests).is_empty());
+        assert!(multi_to_multi_bfs(&g, &[starts], &[dests]).is_empty());
     }
 
     #[test]
@@ -465,7 +500,7 @@ mod tests {
         let g = graph(&[("com.a.Source:x", &["com.b.Mid:y"])]);
         let starts = Regex::new("Source").unwrap();
         let dests = Regex::new("Source").unwrap();
-        let paths = multi_to_multi_bfs(&g, &starts, &dests);
+        let paths = multi_to_multi_bfs(&g, &[starts], &[dests]);
         assert_eq!(paths, vec![vec!["com.a.Source:x"]]);
     }
 
@@ -507,13 +542,27 @@ mod tests {
     #[test]
     #[should_panic(expected = "Failed to parse regex")]
     fn test_handle_trace_bad_start_regex() {
-        let _ = handle_trace("(".to_string(), "foo".to_string(), Format::Printed, vec![]);
+        let _ = handle_trace(
+            "(".to_string(),
+            "foo".to_string(),
+            None,
+            None,
+            Format::Printed,
+            vec![],
+        );
     }
 
     #[test]
     #[should_panic(expected = "Failed to parse regex")]
     fn test_handle_trace_bad_end_regex() {
-        let _ = handle_trace("foo".to_string(), "(".to_string(), Format::Printed, vec![]);
+        let _ = handle_trace(
+            "foo".to_string(),
+            "(".to_string(),
+            None,
+            None,
+            Format::Printed,
+            vec![],
+        );
     }
 
     #[test]
@@ -523,6 +572,8 @@ mod tests {
         let result = handle_trace(
             "onCreate".to_string(),
             "sendTextMessage".to_string(),
+            None,
+            None,
             Format::Printed,
             vec![PathBuf::from("/nonexistent/does-not-exist.apk")],
         );
@@ -531,6 +582,118 @@ mod tests {
 
     #[test]
     fn test_handle_trace_no_apks() {
-        assert!(handle_trace("a".to_string(), "b".to_string(), Format::Printed, vec![]).is_ok());
+        assert!(
+            handle_trace(
+                "a".to_string(),
+                "b".to_string(),
+                None,
+                None,
+                Format::Printed,
+                vec![]
+            )
+            .is_ok()
+        );
+    }
+
+    fn temp_file(content: &str, name: &str) -> PathBuf {
+        let dir = std::env::temp_dir();
+        let path = dir.join(name);
+        std::fs::write(&path, content).unwrap();
+        path
+    }
+
+    #[test]
+    fn test_resolve_patterns_positional() {
+        let patterns = resolve_patterns("onCreate", None).unwrap();
+        assert_eq!(patterns, vec!["onCreate".to_string()]);
+    }
+
+    #[test]
+    fn test_resolve_patterns_from_file() {
+        let path = temp_file("onCreate\nloadUrl\n", "apkhound_trace_src_a.txt");
+        let patterns = resolve_patterns("ignored", Some(&path)).unwrap();
+        assert_eq!(
+            patterns,
+            vec!["onCreate".to_string(), "loadUrl".to_string()]
+        );
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn test_resolve_patterns_from_file_strips_blank_and_crlf() {
+        let path = temp_file("onCreate\r\n\r\n  loadUrl  \n", "apkhound_trace_src_b.txt");
+        let patterns = resolve_patterns("ignored", Some(&path)).unwrap();
+        assert_eq!(
+            patterns,
+            vec!["onCreate".to_string(), "loadUrl".to_string()]
+        );
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn test_resolve_patterns_from_file_unescaped_lines_kept_as_is() {
+        // A line containing a metacharacter stays a single pattern; no
+        // alternation is introduced until matching runs.
+        let path = temp_file("com\\.example\\..*", "apkhound_trace_src_c.txt");
+        let patterns = resolve_patterns("ignored", Some(&path)).unwrap();
+        assert_eq!(patterns, vec!["com\\.example\\..*".to_string()]);
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn test_resolve_patterns_missing_file() {
+        let err = resolve_patterns("ignored", Some(Path::new("/does/not/exist.txt"))).unwrap_err();
+        assert!(err.contains("Failed to read"));
+    }
+
+    #[test]
+    fn test_resolve_patterns_empty_file() {
+        let path = temp_file("", "apkhound_trace_empty.txt");
+        let result = resolve_patterns("ignored", Some(&path));
+        assert!(result.is_err());
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn test_compile_patterns_multiple() {
+        let regs = compile_patterns(&["onCreate".to_string(), "loadUrl".to_string()]);
+        assert_eq!(regs.len(), 2);
+        assert!(regs[0].is_match("com.x:onCreate"));
+        assert!(!regs[0].is_match("com.x:loadUrl"));
+        assert!(regs[1].is_match("com.x:loadUrl"));
+    }
+
+    #[test]
+    #[should_panic(expected = "Failed to parse regex")]
+    fn test_compile_patterns_bad_regex() {
+        let _ = compile_patterns(&["(".to_string()]);
+    }
+
+    #[test]
+    fn test_multi_to_multi_bfs_multiple_start_regexes() {
+        let g = graph(&[
+            ("com.a.Source1:x", &["com.b.Mid:y"]),
+            ("com.a.Source2:z", &["com.b.Mid:y"]),
+            ("com.b.Mid:y", &["com.c.Sink:w"]),
+        ]);
+        let starts = [
+            Regex::new("Source1").unwrap(),
+            Regex::new("Source2").unwrap(),
+        ];
+        let dests = [Regex::new("Sink").unwrap()];
+        let paths = multi_to_multi_bfs(&g, &starts, &dests);
+        assert_eq!(paths.len(), 2);
+    }
+
+    #[test]
+    fn test_multi_to_multi_bfs_multiple_dest_regexes() {
+        let g = graph(&[
+            ("com.a.Source:x", &["com.b.Mid:y"]),
+            ("com.b.Mid:y", &["com.c.Sink:z", "com.c.Other:w"]),
+        ]);
+        let starts = [Regex::new("Source").unwrap()];
+        let dests = [Regex::new("Sink").unwrap(), Regex::new("Other").unwrap()];
+        let paths = multi_to_multi_bfs(&g, &starts, &dests);
+        assert_eq!(paths.len(), 2);
     }
 }

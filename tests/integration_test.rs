@@ -263,6 +263,31 @@ fn test_trace() {
 }
 
 #[test]
+fn test_trace_from_file() {
+    let apk = apk_path("org.videolan.vlc_3.7.1.apk");
+    if apk.is_none() {
+        eprintln!("skipping test_trace_from_file: APK not found");
+        return;
+    }
+    let src_file = std::env::temp_dir().join("apkhound_trace_integration_src.txt");
+    std::fs::write(&src_file, "onCreate\n").expect("failed to write src file");
+    let output = Command::new(binary_path())
+        .arg("trace")
+        .arg("--src-from-file")
+        .arg(&src_file)
+        .arg("loadUrl|sendTextMessage")
+        .arg(apk.unwrap())
+        .output()
+        .expect("failed to run apkhound trace (src from file)");
+    let _ = std::fs::remove_file(&src_file);
+    assert!(output.status.success());
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    if !stdout.is_empty() {
+        assert!(stdout.contains(" -> "));
+    }
+}
+
+#[test]
 fn test_trace_no_matches() {
     let apk = apk_path("org.videolan.vlc_3.7.1.apk");
     if apk.is_none() {

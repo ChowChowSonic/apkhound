@@ -48,6 +48,12 @@ enum Commands {
         src_regex: String,
         /// Regex matching destination method signatures (class:method)
         dest_regex: String,
+        /// File whose non-empty lines are source regexes (overrides src_regex)
+        #[arg(short = 'S', long = "src-from-file")]
+        src_from_file: Option<PathBuf>,
+        /// File whose non-empty lines are destination regexes (overrides dest_regex)
+        #[arg(short = 'D', long = "dest-from-file")]
+        dest_from_file: Option<PathBuf>,
         #[arg(value_enum, short = 'f', long = "format", default_value_t = commands::manifest::Format::Printed)]
         format: Format,
         /// Paths to the APK files
@@ -134,9 +140,18 @@ fn main() {
         Commands::Trace {
             src_regex,
             dest_regex,
+            src_from_file,
+            dest_from_file,
             format,
             apks,
-        } => commands::trace::handle_trace(src_regex, dest_regex, format, apks),
+        } => commands::trace::handle_trace(
+            src_regex,
+            dest_regex,
+            src_from_file,
+            dest_from_file,
+            format,
+            apks,
+        ),
         Commands::Match {
             old_apk,
             new_apk,

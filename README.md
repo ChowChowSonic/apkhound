@@ -105,8 +105,18 @@ Output: `<output_dir>/old/` and `<output_dir>/new/` mirroring the original direc
 Find call paths from methods matching a source regex to methods matching a destination regex.
 
 ```
-apkhound trace <src_regex> <dest_regex> <apk_path>...
+apkhound trace <src_regex> <dest_regex> <apk_path>... [-S <src_file>] [-D <dest_file>] [-f <format>]
 ```
+
+| Flag | Description |
+|------|-------------|
+| `-S`, `--src-from-file` | Read source regexes from a file, overriding `<src_regex>` |
+| `-D`, `--dest-from-file` | Read destination regexes from a file, overriding `<dest_regex>` |
+| `-f`, `--format` | Output format: `printed` (default), `json`, `yaml`, `xml`, `csv` |
+
+A file's non-empty lines are each treated as a separate regex (blank lines and
+line endings are ignored), so the file offers a convenient place to list
+patterns that get unwieldy on the command line.
 
 Signatures are formatted as `class:method`, e.g. `com.example.MainActivity:onCreate`. Both regexes are matched with an unanchored search (`is_match`), so `"onCreate"` matches any `onCreate` method while `"^com\.example\.MainActivity:onCreate$"` pins the exact signature. Destinations may match any method mentioned in the graph — including framework methods that only appear as callees, such as `SmsManager:sendTextMessage` — not just methods declared in the APK.
 
