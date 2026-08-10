@@ -48,12 +48,12 @@ enum Commands {
         src_regex: String,
         /// Regex matching destination method signatures (class:method)
         dest_regex: String,
-        /// File whose non-empty lines are source regexes (overrides src_regex)
+        /// Treat <SRC_REGEX> as a path to a file whose non-empty lines are source regexes
         #[arg(short = 'S', long = "src-from-file")]
-        src_from_file: Option<PathBuf>,
-        /// File whose non-empty lines are destination regexes (overrides dest_regex)
+        src_from_file: bool,
+        /// Treat <DEST_REGEX> as a path to a file whose non-empty lines are destination regexes
         #[arg(short = 'D', long = "dest-from-file")]
-        dest_from_file: Option<PathBuf>,
+        dest_from_file: bool,
         #[arg(value_enum, short = 'f', long = "format", default_value_t = commands::manifest::Format::Printed)]
         format: Format,
         /// Paths to the APK files

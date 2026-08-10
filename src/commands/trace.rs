@@ -162,30 +162,30 @@ fn format_paths(results: &[Vec<String>], format: Format) -> String {
     }
 }
 
-/// Resolve the regexes for one side of a trace.  When `from_file` is `None`,
-/// the single positional pattern is kept as-is.  When a file is given, each
-/// non-empty trimmed line (with trailing carriage returns stripped) becomes
-/// one pattern, preserving the ability to check them in parallel later.
-/// Reading or an empty file is an error.
-fn resolve_patterns(pattern: &str, from_file: Option<&Path>) -> Result<Vec<String>, String> {
-    match from_file {
-        None => Ok(vec![pattern.to_string()]),
-        Some(path) => {
-            let content = std::fs::read_to_string(path)
-                .map_err(|e| format!("Failed to read {}: {}", path.display(), e))?;
-            let patterns: Vec<String> = content
-                .replace('\r', "")
-                .lines()
-                .map(str::trim)
-                .filter(|l| !l.is_empty())
-                .map(str::to_string)
-                .collect();
-            if patterns.is_empty() {
-                Err(format!("{} contains no non-empty regexes", path.display()))
-            } else {
-                Ok(patterns)
-            }
-        }
+/// Resolve the regexes for one side of a trace.  When `from_file` is false,
+/// the positional pattern is kept as-is.  When true, the positional pattern
+/// is itself the path to a file whose each non-empty trimmed line (with
+/// trailing carriage returns stripped) becomes one pattern, preserving the
+/// ability to check them in parallel later.  An unreadable or empty file is
+/// an error.
+fn resolve_patterns(pattern: &str, from_file: bool) -> Result<Vec<String>, String> {
+    if !from_file {
+        return Ok(vec![pattern.to_string()]);
+    }
+    let path = Path::new(pattern);
+    let content = std::fs::read_to_string(path)
+        .map_err(|e| format!("Failed to read {}: {}", path.display(), e))?;
+    let patterns: Vec<String> = content
+        .replace('\r', "")
+        .lines()
+        .map(str::trim)
+        .filter(|l| !l.is_empty())
+        .map(str::to_string)
+        .collect();
+    if patterns.is_empty() {
+        Err(format!("{} contains no non-empty regexes", path.display()))
+    } else {
+        Ok(patterns)
     }
 }
 
@@ -207,20 +207,22 @@ fn compile_patterns(patterns: &[String]) -> Vec<Regex> {
 /// Find call paths from methods matching any of the `start` regexes to
 /// methods matching any of the `end` regexes across all given APKs, and
 /// print the results to stdout.  Signatures are formatted as `class:method`,
-/// e.g. `com.example.MainActivity:onCreate`.  When a `*_from_file` path is
-/// given it overrides the corresponding positional regex. Returns an error
-/// only when no APK can be read; a missing APK is silently skipped, and a
-/// search that finds nothing prints a warning to stderr and succeeds.
+/// e.g. `com.example.MainActivity:onCreate`.  When a `*_from_file` flag is
+/// set the corresponding positional arg is treated as a path to a file whose
+/// non-empty lines are patterns. Returns an error only when a regex file is
+/// unreadable or empty, or no APK can be read; a missing APK is silently
+/// skipped, and a search that finds nothing prints a warning to stderr and
+/// succeeds.
 pub fn handle_trace(
     start_regex: String,
     end_regex: String,
-    src_from_file: Option<PathBuf>,
-    dest_from_file: Option<PathBuf>,
+    src_from_file: bool,
+    dest_from_file: bool,
     format: Format,
     apks: Vec<PathBuf>,
 ) -> Result<(), String> {
-    let start_patterns = resolve_patterns(&start_regex, src_from_file.as_deref())?;
-    let end_patterns = resolve_patterns(&end_regex, dest_from_file.as_deref())?;
+    let start_patterns = resolve_patterns(&start_regex, src_from_file)?;
+    let end_patterns = resolve_patterns(&end_regex, dest_from_file)?;
     let start_regs = compile_patterns(&start_patterns);
     let end_regs = compile_patterns(&end_patterns);
     let files: Vec<ApkFile> = apks
@@ -545,8 +547,8 @@ mod tests {
         let _ = handle_trace(
             "(".to_string(),
             "foo".to_string(),
-            None,
-            None,
+            false,
+            false,
             Format::Printed,
             vec![],
         );
@@ -558,8 +560,8 @@ mod tests {
         let _ = handle_trace(
             "foo".to_string(),
             "(".to_string(),
-            None,
-            None,
+            false,
+            false,
             Format::Printed,
             vec![],
         );
@@ -572,8 +574,8 @@ mod tests {
         let result = handle_trace(
             "onCreate".to_string(),
             "sendTextMessage".to_string(),
-            None,
-            None,
+            false,
+            false,
             Format::Printed,
             vec![PathBuf::from("/nonexistent/does-not-exist.apk")],
         );
@@ -586,8 +588,8 @@ mod tests {
             handle_trace(
                 "a".to_string(),
                 "b".to_string(),
-                None,
-                None,
+                false,
+                false,
                 Format::Printed,
                 vec![]
             )
@@ -604,14 +606,14 @@ mod tests {
 
     #[test]
     fn test_resolve_patterns_positional() {
-        let patterns = resolve_patterns("onCreate", None).unwrap();
+        let patterns = resolve_patterns("onCreate", false).unwrap();
         assert_eq!(patterns, vec!["onCreate".to_string()]);
     }
 
     #[test]
     fn test_resolve_patterns_from_file() {
         let path = temp_file("onCreate\nloadUrl\n", "apkhound_trace_src_a.txt");
-        let patterns = resolve_patterns("ignored", Some(&path)).unwrap();
+        let patterns = resolve_patterns(&path.to_string_lossy(), true).unwrap();
         assert_eq!(
             patterns,
             vec!["onCreate".to_string(), "loadUrl".to_string()]
@@ -622,7 +624,7 @@ mod tests {
     #[test]
     fn test_resolve_patterns_from_file_strips_blank_and_crlf() {
         let path = temp_file("onCreate\r\n\r\n  loadUrl  \n", "apkhound_trace_src_b.txt");
-        let patterns = resolve_patterns("ignored", Some(&path)).unwrap();
+        let patterns = resolve_patterns(&path.to_string_lossy(), true).unwrap();
         assert_eq!(
             patterns,
             vec!["onCreate".to_string(), "loadUrl".to_string()]
@@ -635,21 +637,21 @@ mod tests {
         // A line containing a metacharacter stays a single pattern; no
         // alternation is introduced until matching runs.
         let path = temp_file("com\\.example\\..*", "apkhound_trace_src_c.txt");
-        let patterns = resolve_patterns("ignored", Some(&path)).unwrap();
+        let patterns = resolve_patterns(&path.to_string_lossy(), true).unwrap();
         assert_eq!(patterns, vec!["com\\.example\\..*".to_string()]);
         let _ = std::fs::remove_file(&path);
     }
 
     #[test]
     fn test_resolve_patterns_missing_file() {
-        let err = resolve_patterns("ignored", Some(Path::new("/does/not/exist.txt"))).unwrap_err();
+        let err = resolve_patterns("/does/not/exist.txt", true).unwrap_err();
         assert!(err.contains("Failed to read"));
     }
 
     #[test]
     fn test_resolve_patterns_empty_file() {
         let path = temp_file("", "apkhound_trace_empty.txt");
-        let result = resolve_patterns("ignored", Some(&path));
+        let result = resolve_patterns(&path.to_string_lossy(), true);
         assert!(result.is_err());
         let _ = std::fs::remove_file(&path);
     }

@@ -110,9 +110,14 @@ apkhound trace <src_regex> <dest_regex> <apk_path>... [-S <src_file>] [-D <dest_
 
 | Flag | Description |
 |------|-------------|
-| `-S`, `--src-from-file` | Read source regexes from a file, overriding `<src_regex>` |
-| `-D`, `--dest-from-file` | Read destination regexes from a file, overriding `<dest_regex>` |
+| `-S`, `--src-from-file` | Treat `<src_regex>` as a path to a file whose non-empty lines are source regexes |
+| `-D`, `--dest-from-file` | Treat `<dest_regex>` as a path to a file whose non-empty lines are destination regexes |
 | `-f`, `--format` | Output format: `printed` (default), `json`, `yaml`, `xml`, `csv` |
+
+```
+apkhound trace -S src_patterns.txt "loadUrl|sendTextMessage" app.apk
+apkhound trace -S -D src_patterns.txt dest_patterns.txt app.apk
+```
 
 A file's non-empty lines are each treated as a separate regex (blank lines and
 line endings are ignored), so the file offers a convenient place to list
