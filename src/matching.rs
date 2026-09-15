@@ -27,6 +27,73 @@ pub struct MatchParams {
     pub api_weight: f64,
     pub hier_weight: f64,
     pub string_weight: f64,
+    pub excluded_features: Vec<Feature>,
+}
+
+/// A scoring feature that can be excluded from the combined match score.
+/// Coarse variants drop whole similarity components from the score; dimension
+/// variants mask a single slot of the 19-dimensional per-method feature
+/// vector before WL label hashing; `api_*` variants drop a category of
+/// external calls from the API fingerprint (and mask its `ext_*` dimension).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, clap::ValueEnum)]
+#[value(rename_all = "snake_case")]
+pub enum Feature {
+    /// Weisfeiler-Lehman graph-histogram similarity.
+    Wl,
+    /// API-call fingerprint Jaccard similarity.
+    Api,
+    /// String-constant content fingerprint Jaccard similarity.
+    String,
+    /// Hierarchical ancestor-consistency boost.
+    Hier,
+    /// WL feature dimension: per-node in-degree.
+    InDegree,
+    /// WL feature dimension: per-node out-degree.
+    OutDegree,
+    /// WL feature dimension: count of calls to android/androidx classes.
+    ExtAndroid,
+    /// WL feature dimension: count of calls to java/javax classes.
+    ExtJava,
+    /// WL feature dimension: count of calls to kotlin/kotlinx classes.
+    ExtKotlin,
+    /// WL feature dimension: count of calls to other external classes.
+    ExtOther,
+    /// WL feature dimension: count of invoke-virtual/super ops.
+    InvokeVirtual,
+    /// WL feature dimension: count of invoke-static ops.
+    InvokeStatic,
+    /// WL feature dimension: count of invoke-direct ops.
+    InvokeDirect,
+    /// WL feature dimension: count of invoke-interface ops.
+    InvokeInterface,
+    /// WL feature dimension: number of parameters.
+    NumParams,
+    /// WL feature dimension: number of instructions.
+    NumInstructions,
+    /// WL feature dimension: whether the method has branch/switch ops.
+    HasBranches,
+    /// WL feature dimension: number of const-string ops.
+    StringConsts,
+    /// WL feature dimension: number of field access ops.
+    FieldAccess,
+    /// WL feature dimension: number of try/catch handlers.
+    TryCatch,
+    /// WL feature dimension: register (or local) count.
+    RegisterCount,
+    /// WL feature dimension: whether the method is a constructor.
+    IsConstructor,
+    /// WL feature dimension: return-type category.
+    ReturnType,
+    /// API fingerprint category: android framework calls.
+    ApiAndroid,
+    /// API fingerprint category: androidx/androidx-compat calls.
+    ApiAndroidx,
+    /// API fingerprint category: java/javax calls.
+    ApiJava,
+    /// API fingerprint category: kotlin/kotlinx calls.
+    ApiKotlin,
+    /// API fingerprint category: all other external calls.
+    ApiOther,
 }
 
 /// Bundles the WL histograms, per-node final labels, and adjacency of a
@@ -141,6 +208,59 @@ fn categorize_external(jni_class: &str) -> &'static str {
     } else {
         "other"
     }
+}
+
+/// Build a per-dimension mask describing which of the 19 WL feature
+/// dimensions are excluded. Both explicit dimension exclusions and `api_*`
+/// category exclusions set bits, the latter because the `ext_*` counters are
+/// derived from those same external-call categories. A `true` slot means that
+/// dimension is masked (zeroed) before WL label hashing.
+fn feature_dim_mask(excluded: &[Feature]) -> [bool; 19] {
+    let mut mask = [false; 19];
+    for f in excluded {
+        let idx: Option<usize> = match f {
+            Feature::InDegree => Some(IDX_IN_DEGREE),
+            Feature::OutDegree => Some(IDX_OUT_DEGREE),
+            Feature::ExtAndroid | Feature::ApiAndroid | Feature::ApiAndroidx => {
+                Some(IDX_EXT_ANDROID)
+            }
+            Feature::ExtJava | Feature::ApiJava => Some(IDX_EXT_JAVA),
+            Feature::ExtKotlin | Feature::ApiKotlin => Some(IDX_EXT_KOTLIN),
+            Feature::ExtOther | Feature::ApiOther => Some(IDX_EXT_OTHER),
+            Feature::InvokeVirtual => Some(IDX_INVOKE_VIRTUAL),
+            Feature::InvokeStatic => Some(IDX_INVOKE_STATIC),
+            Feature::InvokeDirect => Some(IDX_INVOKE_DIRECT),
+            Feature::InvokeInterface => Some(IDX_INVOKE_INTERFACE),
+            Feature::NumParams => Some(IDX_NUM_PARAMS),
+            Feature::NumInstructions => Some(IDX_NUM_INSTRUCTIONS),
+            Feature::HasBranches => Some(IDX_HAS_BRANCHES),
+            Feature::StringConsts => Some(IDX_STRING_CONSTS),
+            Feature::FieldAccess => Some(IDX_FIELD_ACCESS),
+            Feature::TryCatch => Some(IDX_TRY_CATCH),
+            Feature::RegisterCount => Some(IDX_REGISTER_COUNT),
+            Feature::IsConstructor => Some(IDX_IS_CONSTRUCTOR),
+            Feature::ReturnType => Some(IDX_RETURN_TYPE),
+            _ => None,
+        };
+        if let Some(i) = idx {
+            mask[i] = true;
+        }
+    }
+    mask
+}
+
+/// Check whether external calls to `jni_class` are excluded by any `api_*`
+/// feature in the exclusion list.
+fn is_api_category_excluded(excluded: &[Feature], jni_class: &str) -> bool {
+    let cat = categorize_external(jni_class);
+    excluded.iter().any(|f| match f {
+        Feature::ApiAndroid => cat == "android",
+        Feature::ApiAndroidx => cat == "androidx",
+        Feature::ApiJava => cat == "java",
+        Feature::ApiKotlin => cat == "kotlin",
+        Feature::ApiOther => cat == "other",
+        _ => false,
+    })
 }
 
 fn get_method_key(class_jni: &str, method: &SmaliMethod) -> String {
@@ -342,9 +462,12 @@ fn is_primitive_type(ts: &TypeSignature) -> bool {
 
 /// Partition a list of `SmaliClass` values by package, build a
 /// `PackageGraph` (call graph + feature vectors) for each non-empty
-/// package, and return the method counts per package.
+/// package, and return the method counts per package. External API calls
+/// whose category is excluded by an `api_*` item in `excluded` are dropped
+/// from the API fingerprints.
 pub fn build_package_graphs(
     classes: &[SmaliClass],
+    excluded: &[Feature],
 ) -> (
     FxHashMap<String, Option<PackageGraph>>,
     FxHashMap<String, usize>,
@@ -406,7 +529,9 @@ pub fn build_package_graphs(
             }
             features.push(feats);
             for (class, method_name) in api_calls {
-                pkg_api_calls.insert((class, method_name));
+                if !is_api_category_excluded(excluded, &class) {
+                    pkg_api_calls.insert((class, method_name));
+                }
             }
             for s in method_strings {
                 pkg_strings.insert(s);
@@ -484,9 +609,29 @@ fn hash_features(features: &[i32; 19]) -> u64 {
     hasher.finish()
 }
 
-fn wl_histograms(adj: &[Vec<usize>], features_x: &[[i32; 19]], n_iter: usize) -> WLSig {
+fn wl_histograms(
+    adj: &[Vec<usize>],
+    features_x: &[[i32; 19]],
+    n_iter: usize,
+    dim_mask: &[bool; 19],
+) -> WLSig {
     let neigh = build_neighborhoods(adj);
-    let mut labels: Vec<u64> = features_x.iter().map(hash_features).collect();
+    let masked = dim_mask.iter().any(|&m| m);
+    let mut labels: Vec<u64> = features_x
+        .iter()
+        .map(|f| {
+            if !masked {
+                return hash_features(f);
+            }
+            let mut c = *f;
+            for (i, &m) in dim_mask.iter().enumerate() {
+                if m {
+                    c[i] = 0;
+                }
+            }
+            hash_features(&c)
+        })
+        .collect();
     let mut new_labels = Vec::with_capacity(labels.len());
     let mut nbr_buf = Vec::new();
 
@@ -613,6 +758,7 @@ fn compute_sigs_and_names(
     old_data: &FxHashMap<String, Option<PackageGraph>>,
     new_data: &FxHashMap<String, Option<PackageGraph>>,
     n_iter: usize,
+    dim_mask: &[bool; 19],
 ) -> (
     SigsMap,
     SigsMap,
@@ -627,7 +773,7 @@ fn compute_sigs_and_names(
             data_opt.as_ref().map(|data| {
                 (
                     name.clone(),
-                    wl_histograms(&data.adjacency, &data.features, n_iter),
+                    wl_histograms(&data.adjacency, &data.features, n_iter, dim_mask),
                 )
             })
         })
@@ -639,7 +785,7 @@ fn compute_sigs_and_names(
             data_opt.as_ref().map(|data| {
                 (
                     name.clone(),
-                    wl_histograms(&data.adjacency, &data.features, n_iter),
+                    wl_histograms(&data.adjacency, &data.features, n_iter, dim_mask),
                 )
             })
         })
@@ -677,13 +823,55 @@ fn compute_sigs_and_names(
     )
 }
 
+/// Compute the effective weights for a matching run. Excluded features are
+/// left out of the normalization pool entirely, and the retained weights are
+/// scaled so the base components (wl, api, string) sum to 1.0. Returns
+/// `(wl_weight, api_weight, string_weight, hier_weight)`.
+fn effective_weights(params: &MatchParams) -> (f64, f64, f64, f64) {
+    let ex = &params.excluded_features;
+    let hier = if ex.contains(&Feature::Hier) {
+        0.0
+    } else {
+        params.hier_weight
+    };
+
+    let retained_wl = if ex.contains(&Feature::Wl) {
+        0.0
+    } else {
+        (1.0 - params.api_weight - params.string_weight).max(0.0)
+    };
+    let retained_api = if ex.contains(&Feature::Api) {
+        0.0
+    } else {
+        params.api_weight
+    };
+    let retained_string = if ex.contains(&Feature::String) {
+        0.0
+    } else {
+        params.string_weight
+    };
+
+    let total = retained_wl + retained_api + retained_string;
+    if total <= 0.0 {
+        tracing::warn!("All matching features excluded; scores will be zero");
+        (0.0, 0.0, 0.0, hier)
+    } else {
+        (
+            retained_wl / total,
+            retained_api / total,
+            retained_string / total,
+            hier,
+        )
+    }
+}
+
 fn compute_scores(
     old: &SideData,
     new: &SideData,
+    wl_weight: f64,
     api_weight: f64,
     string_weight: f64,
 ) -> Vec<(usize, i32, f64)> {
-    let wl_weight = (1.0 - api_weight - string_weight).max(0.0);
     old.names
         .par_iter()
         .enumerate()
@@ -790,12 +978,11 @@ pub fn match_packages(
     old_parents: &FxHashMap<String, Vec<String>>,
     new_parents: &FxHashMap<String, Vec<String>>,
 ) -> Vec<MatchEntry> {
-    let string_weight = params.string_weight;
-    let wl_weight = (1.0 - params.api_weight - string_weight).max(0.0);
+    let (wl_weight, api_weight, string_weight, hier_weight) = effective_weights(params);
 
-    let mut old_best = compute_scores(old, new, params.api_weight, string_weight);
+    let mut old_best = compute_scores(old, new, wl_weight, api_weight, string_weight);
 
-    let (mut results, _) = if params.hier_weight <= 0.0 {
+    let (mut results, _) = if hier_weight <= 0.0 {
         greedy_assign(
             &mut old_best,
             old.names,
@@ -847,8 +1034,7 @@ pub fn match_packages(
                         (Some(a), Some(b)) => string_similarity(a, b),
                         _ => 0.0,
                     };
-                    let base_s =
-                        wl_weight * s_wl + params.api_weight * s_api + string_weight * s_string;
+                    let base_s = wl_weight * s_wl + api_weight * s_api + string_weight * s_string;
                     let hier_factor = if base_s > 0.0 {
                         let n_consistent = ancestor_chain(on)
                             .iter()
@@ -862,7 +1048,7 @@ pub fn match_packages(
                             .len()
                             .min(ancestor_chain(nn).len())
                             .max(1);
-                        1.0 + params.hier_weight * (n_consistent as f64 / n_levels as f64)
+                        1.0 + hier_weight * (n_consistent as f64 / n_levels as f64)
                     } else {
                         1.0
                     };
@@ -1032,11 +1218,12 @@ pub fn run_match(
     params: &MatchParams,
 ) -> MatchResult {
     let (old_data, old_method_counts, old_api_fps, old_string_fps) =
-        build_package_graphs(old_classes);
+        build_package_graphs(old_classes, &params.excluded_features);
     let (new_data, new_method_counts, new_api_fps, new_string_fps) =
-        build_package_graphs(new_classes);
+        build_package_graphs(new_classes, &params.excluded_features);
+    let dim_mask = feature_dim_mask(&params.excluded_features);
     let (old_sigs, new_sigs, old_names, new_names, old_no_graph, new_no_graph) =
-        compute_sigs_and_names(&old_data, &new_data, params.wl_iterations);
+        compute_sigs_and_names(&old_data, &new_data, params.wl_iterations, &dim_mask);
 
     let old = SideData {
         sigs: &old_sigs,
@@ -1397,7 +1584,7 @@ mod tests {
     fn test_wl_histograms_single_node() {
         let adj = vec![vec![]];
         let features = [[1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]];
-        let sig = wl_histograms(&adj, &features, 2);
+        let sig = wl_histograms(&adj, &features, 2, &[false; 19]);
         assert_eq!(sig.hists.len(), 3); // 0, 1, 2 iterations
         for hist in &sig.hists {
             assert_eq!(hist.len(), 1); // single node, single label
@@ -1411,10 +1598,87 @@ mod tests {
             [1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0],
             [2, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0],
         ];
-        let sig = wl_histograms(&adj, &features, 1);
+        let sig = wl_histograms(&adj, &features, 1, &[false; 19]);
         assert_eq!(sig.hists.len(), 2);
         // initial hist should have 2 distinct labels
         assert_eq!(sig.hists[0].len(), 2);
+    }
+
+    #[test]
+    fn test_wl_histograms_masked_dimension() {
+        // Two nodes differing only in dimension 0 collapse to one label when
+        // that dimension is masked.
+        let adj = vec![vec![1], vec![0]];
+        let features = [
+            [1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0],
+            [2, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0],
+        ];
+        let mut mask = [false; 19];
+        mask[IDX_IN_DEGREE] = true;
+        let sig = wl_histograms(&adj, &features, 1, &mask);
+        assert_eq!(sig.hists[0].len(), 1); // masked dim no longer separates nodes
+    }
+
+    #[test]
+    fn test_feature_dim_mask_none_excluded() {
+        let mask = feature_dim_mask(&[]);
+        assert!(mask.iter().all(|&m| !m));
+    }
+
+    #[test]
+    fn test_feature_dim_mask_single_dimension() {
+        let mask = feature_dim_mask(&[Feature::HasBranches]);
+        let mut expect = [false; 19];
+        expect[IDX_HAS_BRANCHES] = true;
+        assert_eq!(mask, expect);
+    }
+
+    #[test]
+    fn test_feature_dim_mask_multiple() {
+        let mask = feature_dim_mask(&[
+            Feature::NumParams,
+            Feature::StringConsts,
+            Feature::ReturnType,
+        ]);
+        assert!(mask[IDX_NUM_PARAMS]);
+        assert!(mask[IDX_STRING_CONSTS]);
+        assert!(mask[IDX_RETURN_TYPE]);
+        assert_eq!(mask.iter().filter(|&&m| m).count(), 3);
+    }
+
+    #[test]
+    fn test_feature_dim_mask_api_categories_map_to_ext_dims() {
+        let mask = feature_dim_mask(&[Feature::ApiAndroid, Feature::ApiJava]);
+        assert!(mask[IDX_EXT_ANDROID]);
+        assert!(mask[IDX_EXT_JAVA]);
+        assert!(!mask[IDX_EXT_KOTLIN]);
+        // androidx shares the ext_android dimension
+        assert!(feature_dim_mask(&[Feature::ApiAndroidx])[IDX_EXT_ANDROID]);
+    }
+
+    #[test]
+    fn test_feature_dim_mask_coarse_features_ignored() {
+        let mask = feature_dim_mask(&[Feature::Wl, Feature::Api, Feature::String, Feature::Hier]);
+        assert!(mask.iter().all(|&m| !m));
+    }
+
+    #[test]
+    fn test_is_api_category_excluded() {
+        let excluded = [Feature::ApiAndroid, Feature::ApiKotlin];
+        assert!(is_api_category_excluded(
+            &excluded,
+            "Landroid/app/Activity;"
+        ));
+        assert!(is_api_category_excluded(
+            &excluded,
+            "Lkotlin/jvm/internal/Intrinsics;"
+        ));
+        assert!(!is_api_category_excluded(&excluded, "Ljava/lang/String;"));
+        assert!(!is_api_category_excluded(&excluded, "Lcom/example/Foo;"));
+        assert!(!is_api_category_excluded(
+            &[Feature::Wl],
+            "Landroid/app/Activity;"
+        ));
     }
 
     #[test]
@@ -1465,6 +1729,7 @@ mod tests {
             api_weight: 0.0,
             hier_weight: 0.0,
             string_weight: 0.0,
+            excluded_features: vec![],
         };
         let results = match_packages(
             &old_sd,
@@ -1518,6 +1783,7 @@ mod tests {
             api_weight: 0.0,
             hier_weight: 0.0,
             string_weight: 0.0,
+            excluded_features: vec![],
         };
         let results = match_packages(
             &old_sd,
@@ -1569,6 +1835,7 @@ mod tests {
             api_weight: 0.0,
             hier_weight: 0.0,
             string_weight: 0.0,
+            excluded_features: vec![],
         };
         let results = match_packages(
             &old_sd,
@@ -1607,6 +1874,7 @@ mod tests {
             api_weight: 0.0,
             hier_weight: 0.0,
             string_weight: 0.0,
+            excluded_features: vec![],
         };
         let results = match_packages(
             &old_sd,
@@ -1620,5 +1888,133 @@ mod tests {
                 .iter()
                 .any(|r| r.0 == "pkgEmpty" && r.3 == "REMOVED")
         );
+    }
+
+    #[test]
+    fn test_effective_weights_defaults() {
+        let params = MatchParams {
+            match_threshold: 0.8,
+            change_threshold: 0.0,
+            wl_iterations: 0,
+            use_node_matching: false,
+            api_weight: 0.2,
+            hier_weight: 0.7,
+            string_weight: 0.3,
+            excluded_features: vec![],
+        };
+        let (wl, api, string, hier) = effective_weights(&params);
+        assert!((wl - 0.5).abs() < 1e-9);
+        assert!((api - 0.2).abs() < 1e-9);
+        assert!((string - 0.3).abs() < 1e-9);
+        assert!((hier - 0.7).abs() < 1e-9);
+    }
+
+    #[test]
+    fn test_effective_weights_exclude_api() {
+        let params = MatchParams {
+            match_threshold: 0.8,
+            change_threshold: 0.0,
+            wl_iterations: 0,
+            use_node_matching: false,
+            api_weight: 0.2,
+            hier_weight: 0.7,
+            string_weight: 0.3,
+            excluded_features: vec![Feature::Api],
+        };
+        let (wl, api, string, hier) = effective_weights(&params);
+        assert!((wl - 0.625).abs() < 1e-9);
+        assert!(api == 0.0);
+        assert!((string - 0.375).abs() < 1e-9);
+        assert!((hier - 0.7).abs() < 1e-9);
+    }
+
+    #[test]
+    fn test_effective_weights_exclude_string() {
+        let params = MatchParams {
+            match_threshold: 0.8,
+            change_threshold: 0.0,
+            wl_iterations: 0,
+            use_node_matching: false,
+            api_weight: 0.2,
+            hier_weight: 0.7,
+            string_weight: 0.3,
+            excluded_features: vec![Feature::String],
+        };
+        let (wl, api, string, hier) = effective_weights(&params);
+        assert!((wl - 0.5 / 0.7).abs() < 1e-9);
+        assert!((api - 0.2 / 0.7).abs() < 1e-9);
+        assert!(string == 0.0);
+        assert!((hier - 0.7).abs() < 1e-9);
+    }
+
+    #[test]
+    fn test_effective_weights_exclude_wl() {
+        let params = MatchParams {
+            match_threshold: 0.8,
+            change_threshold: 0.0,
+            wl_iterations: 0,
+            use_node_matching: false,
+            api_weight: 0.2,
+            hier_weight: 0.7,
+            string_weight: 0.3,
+            excluded_features: vec![Feature::Wl],
+        };
+        let (wl, api, string, hier) = effective_weights(&params);
+        assert!(wl == 0.0);
+        assert!((api - 0.4).abs() < 1e-9);
+        assert!((string - 0.6).abs() < 1e-9);
+        assert!((hier - 0.7).abs() < 1e-9);
+    }
+
+    #[test]
+    fn test_effective_weights_exclude_hier() {
+        let params = MatchParams {
+            match_threshold: 0.8,
+            change_threshold: 0.0,
+            wl_iterations: 0,
+            use_node_matching: false,
+            api_weight: 0.2,
+            hier_weight: 0.7,
+            string_weight: 0.3,
+            excluded_features: vec![Feature::Hier],
+        };
+        let (wl, api, string, hier) = effective_weights(&params);
+        assert!((wl - 0.5).abs() < 1e-9);
+        assert!((api - 0.2).abs() < 1e-9);
+        assert!((string - 0.3).abs() < 1e-9);
+        assert!(hier == 0.0);
+    }
+
+    #[test]
+    fn test_effective_weights_exclude_all() {
+        let params = MatchParams {
+            match_threshold: 0.8,
+            change_threshold: 0.0,
+            wl_iterations: 0,
+            use_node_matching: false,
+            api_weight: 0.2,
+            hier_weight: 0.7,
+            string_weight: 0.3,
+            excluded_features: vec![Feature::Wl, Feature::Api, Feature::String, Feature::Hier],
+        };
+        let (wl, api, string, hier) = effective_weights(&params);
+        assert!(wl == 0.0 && api == 0.0 && string == 0.0 && hier == 0.0);
+    }
+
+    #[test]
+    fn test_effective_weights_exclude_default_pool() {
+        let params = MatchParams {
+            match_threshold: 0.8,
+            change_threshold: 0.0,
+            wl_iterations: 0,
+            use_node_matching: false,
+            api_weight: 0.0,
+            hier_weight: 0.7,
+            string_weight: 0.0,
+            excluded_features: vec![Feature::Wl],
+        };
+        // WL excluded and both api/string weights are 0: no retained weight remains.
+        let (wl, api, string, _hier) = effective_weights(&params);
+        assert!(wl == 0.0 && api == 0.0 && string == 0.0);
     }
 }

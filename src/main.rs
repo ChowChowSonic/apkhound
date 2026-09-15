@@ -96,6 +96,11 @@ enum Commands {
         /// Weight of string-constant fingerprint in combined score (0.0 = disabled)
         #[arg(long = "string-weight", default_value_t = 0.3)]
         string_weight: f64,
+        /// Exclude scoring features from the combined score: coarse components (wl, api, string, hier),
+        /// WL feature dimensions (in_degree, num_params, has_branches, ...), or API categories
+        /// (api_android, api_androidx, api_java, api_kotlin, api_other). Repeatable or comma-separated.
+        #[arg(long = "exclude-feature", value_delimiter = ',')]
+        exclude_features: Vec<apkhound::matching::Feature>,
     },
     /// Compare manifest permissions between two APKs, or list permissions of one
     Permissions {
@@ -165,6 +170,7 @@ fn main() {
             api_weight,
             hier_weight,
             string_weight,
+            exclude_features,
         } => commands::match_cmd::handle_match(
             old_apk,
             new_apk,
@@ -179,6 +185,7 @@ fn main() {
                 api_weight,
                 hier_weight,
                 string_weight,
+                exclude_features,
             },
         ),
         Commands::Permissions { old_apk, new_apk } => {

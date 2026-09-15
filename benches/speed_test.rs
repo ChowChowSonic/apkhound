@@ -1,6 +1,7 @@
 use apkhound::commands::callgraph::handle_callgraph;
 use apkhound::commands::compare::handle_compare;
 use apkhound::commands::match_cmd::{MatchConfig, handle_match};
+use apkhound::matching::Feature;
 use criterion::{Criterion, criterion_group, criterion_main};
 use std::hint::black_box;
 use std::path::PathBuf;
@@ -19,6 +20,7 @@ fn bench_run_match(c: &mut Criterion) {
         api_weight: 0.2,
         hier_weight: 0.7,
         string_weight: 0.3,
+        exclude_features: vec![Feature::Hier],
     };
 
     let mut group = c.benchmark_group("run_match");
