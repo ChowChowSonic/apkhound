@@ -324,6 +324,121 @@ fn test_trace_invalid_regex() {
 }
 
 #[test]
+fn test_stats() {
+    let apk = apk_path("org.videolan.vlc_3.7.1.apk");
+    if apk.is_none() {
+        eprintln!("skipping test_stats: APK not found");
+        return;
+    }
+    let output = Command::new(binary_path())
+        .arg("stats")
+        .arg(apk.unwrap())
+        .output()
+        .expect("failed to run apkhound stats");
+    assert!(output.status.success());
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(stdout.contains("Classes"));
+    assert!(stdout.contains("Methods"));
+    assert!(stdout.contains("Opcodes"));
+}
+
+#[test]
+fn test_stats_json() {
+    let apk = apk_path("org.videolan.vlc_3.7.1.apk");
+    if apk.is_none() {
+        eprintln!("skipping test_stats_json: APK not found");
+        return;
+    }
+    let output = Command::new(binary_path())
+        .arg("stats")
+        .arg("--format")
+        .arg("json")
+        .arg(apk.unwrap())
+        .output()
+        .expect("failed to run apkhound stats --format json");
+    assert!(output.status.success());
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(stdout.contains("\"classes\""));
+    assert!(stdout.contains("\"methods\""));
+}
+
+#[test]
+fn test_stats_csv() {
+    let apk = apk_path("org.videolan.vlc_3.7.1.apk");
+    if apk.is_none() {
+        eprintln!("skipping test_stats_csv: APK not found");
+        return;
+    }
+    let output = Command::new(binary_path())
+        .arg("stats")
+        .arg("--format")
+        .arg("csv")
+        .arg(apk.unwrap())
+        .output()
+        .expect("failed to run apkhound stats --format csv");
+    assert!(output.status.success());
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(stdout.contains("classes"));
+    assert!(stdout.contains("op_total"));
+}
+
+#[test]
+fn test_stats_graph() {
+    let apk = apk_path("org.videolan.vlc_3.7.1.apk");
+    if apk.is_none() {
+        eprintln!("skipping test_stats_graph: APK not found");
+        return;
+    }
+    let output = Command::new(binary_path())
+        .arg("stats")
+        .arg("--graph")
+        .arg(apk.unwrap())
+        .output()
+        .expect("failed to run apkhound stats --graph");
+    assert!(output.status.success());
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(stdout.contains("Call graph"));
+    assert!(stdout.contains("Nodes"));
+    assert!(stdout.contains("Edges"));
+}
+
+#[test]
+fn test_stats_diff() {
+    let old = apk_path("org.videolan.vlc_3.5.4.apk");
+    let new = apk_path("org.videolan.vlc_3.7.1.apk");
+    if old.is_none() || new.is_none() {
+        eprintln!("skipping test_stats_diff: APK files not found");
+        return;
+    }
+    let output = Command::new(binary_path())
+        .arg("stats")
+        .arg(old.unwrap())
+        .arg(new.unwrap())
+        .output()
+        .expect("failed to run apkhound stats (diff)");
+    assert!(output.status.success());
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(stdout.contains("Diff (old -> new)"));
+    assert!(stdout.contains("classes"));
+    assert!(stdout.contains("Change coverage (old -> new)"));
+    assert!(stdout.contains("%changed"));
+}
+
+#[test]
+fn test_stats_rejects_three_apks() {
+    // The CLI accepts exactly one or two APKs; a third must be a clap error
+    // regardless of whether the files exist.
+    let output = Command::new(binary_path())
+        .arg("stats")
+        .arg("/nonexistent/a.apk")
+        .arg("/nonexistent/b.apk")
+        .arg("/nonexistent/c.apk")
+        .output()
+        .expect("failed to run apkhound stats (three apks)");
+    assert!(!output.status.success());
+}
+
+#[test]
 fn test_help() {
     let output = Command::new(binary_path())
         .arg("--help")
@@ -338,4 +453,5 @@ fn test_help() {
     assert!(stdout.contains("match"));
     assert!(stdout.contains("extract"));
     assert!(stdout.contains("trace"));
+    assert!(stdout.contains("stats"));
 }

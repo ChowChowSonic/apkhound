@@ -27,6 +27,7 @@
 - **Graph kernel matching** — Match packages across APK versions using a Weisfeiler-Lehman (WL) graph kernel blended with API-call fingerprint similarity, string-constant content fingerprints, hierarchical ancestor-consistency refinement, and empty-package matching with default-package collapse awareness. Configurable similarity thresholds and weighting controls.
 - **Permission diffing** — List or diff `uses-permission` entries between APK versions.
 - **Manifest inspection** — Extract and display `AndroidManifest.xml` in human-readable, JSON, YAML, or raw XML format.
+- **Statistics** — Report structural metrics (classes, methods, instructions, opcode families, call-graph shape) for one or more APKs, including a two-APK metric diff.
 
 ## Installation
 
@@ -55,6 +56,12 @@ apkhound trace "onCreate" "sendTextMessage|loadUrl" app.apk
 
 # Display the manifest
 apkhound manifest app.apk json
+
+# Report statistics for an APK (including call-graph metrics)
+apkhound stats app.apk --graph
+
+# Diff statistics between two APK versions
+apkhound stats app-v1.0.apk app-v1.1.apk
 ```
 
 ## CLI Reference
@@ -184,6 +191,42 @@ apkhound manifest <apk_path> [format]
 | `yaml` | YAML |
 | `xml` | Raw XML |
 
+### `stats`
+
+Report structural statistics for one or two APKs; when two are given, also
+emit a metric diff between them. The command rejects any other number of
+APK paths.
+
+```
+apkhound stats <apk_path> [<apk_path>] [-f <regex>...] [-g] [--format printed|json|csv]
+```
+
+| Flag | Default | Description |
+|------|---------|-------------|
+| `-f`, `--filterclass` | — | Regex filter for class names (repeatable) |
+| `-g`, `--graph` | `false` | Also compute call-graph metrics (requires an extra parse pass) |
+| `--format` | `printed` | Output format: `printed`, `json`, or `csv` |
+
+Reported metrics:
+
+- **APK-level** — file size in bytes, number of DEX entries
+- **Code** — classes, methods, constructors, instructions (total / avg / min / max per method), methods per modifier (public, private, static, …), and opcode-family counts: `invoke-*` kinds, `const-*`, string constants, field access, branches, returns, moves, monitors, allocations, exceptions, array access, comparisons, and try/catch. The top 10 packages by class count are listed too.
+- **Call graph** (with `--graph`) — nodes, edges, max in/out degree, isolated methods, and density
+
+All numbers respect the `-f` class filters. With two APKs, the `printed` and
+`json` outputs also include:
+
+- a `Diff (old -> new)` section showing the delta and percent change for every metric, and
+- a **Change coverage (old -> new)** section that measures how much of the code actually changed, broken down by classes, methods, and instructions. For each unit type it reports how many were `added` (only in the new APK), `removed` (only in the old APK), `modified` (present in both but with different bytecode — method bodies are compared opcode-for-opcode, exactly like `compare`), and `unchanged`. `union` is the number of distinct units across both APKs and `%changed` is `(added + removed + modified) / union`, so it is always between 0 and 100%. For example, "methods: 65.02%" means 65% of all distinct methods that exist in either version differ between the two.
+
+`csv` emits one row per APK.
+
+```
+apkhound stats app.apk
+apkhound stats app.apk --graph --format json
+apkhound stats app-v1.0.apk app-v1.1.apk
+```
+
 ## How It Works
 
 ### DEX Parsing
@@ -259,6 +302,7 @@ Packages from two APK versions are matched using a multi-component similarity pi
 │   ├── compare.rs              # APK diff and smali dump
 │   ├── matching.rs             # WL graph kernel matching
 │   ├── manifest_summary.rs     # Manifest parse + JSON/YAML output
+│   ├── stats.rs                # APK statistics and diffs
 │   ├── utils.rs                # Shared helpers, permission diffing
 │   └── commands/
 │       ├── mod.rs
@@ -268,21 +312,22 @@ Packages from two APK versions are matched using a multi-component similarity pi
 │       ├── manifest.rs
 │       ├── match_cmd.rs
 │       ├── permissions.rs
+│       ├── stats.rs
 │       └── trace.rs
 └── tests/
-    └── integration_test.rs     # 14 binary-level integration tests
+    └── integration_test.rs     # 20 binary-level integration tests
 ```
 
 ## Testing & Benchmarks
 
 ```bash
-# Unit tests (90 tests across lib modules)
+# Unit tests (126 tests across lib modules)
 cargo test --lib
 
 # Integration tests (requires VLC APKs — downloaded in CI)
 cargo test --test integration_test
 
-# Benchmarks (3 criterion benchmarks)
+# Benchmarks (4 criterion benchmarks)
 cargo bench
 ```
 

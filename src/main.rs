@@ -108,6 +108,21 @@ enum Commands {
         #[arg(value_enum, default_value_t = commands::manifest::Format::Printed)]
         format: commands::manifest::Format,
     },
+    /// Compute statistics for one or two APK files (diffs them when both given)
+    Stats {
+        /// Path to an APK file (exactly one or two)
+        #[arg(required = true, num_args = 1..=2)]
+        apks: Vec<PathBuf>,
+        /// Regex filter for class names (can be specified multiple times)
+        #[arg(short = 'f', long = "filterclass")]
+        filters: Vec<String>,
+        /// Include call-graph metrics (requires an extra parse pass)
+        #[arg(short = 'g', long = "graph")]
+        graph: bool,
+        /// Output format
+        #[arg(value_enum, long = "format", default_value_t = commands::stats::StatsFormat::Printed)]
+        format: commands::stats::StatsFormat,
+    },
 }
 
 fn main() {
@@ -187,6 +202,12 @@ fn main() {
         Commands::Manifest { apk_path, format } => {
             commands::manifest::handle_manifest(apk_path, format)
         }
+        Commands::Stats {
+            apks,
+            filters,
+            graph,
+            format,
+        } => commands::stats::handle_stats(apks, filters, graph, format),
     };
     if let Err(e) = result {
         eprintln!("error: {e}");

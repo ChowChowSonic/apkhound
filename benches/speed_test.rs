@@ -1,6 +1,7 @@
 use apkhound::commands::callgraph::handle_callgraph;
 use apkhound::commands::compare::handle_compare;
 use apkhound::commands::match_cmd::{MatchConfig, handle_match};
+use apkhound::commands::stats::{StatsFormat, handle_stats};
 use criterion::{Criterion, criterion_group, criterion_main};
 use std::hint::black_box;
 use std::path::PathBuf;
@@ -66,5 +67,30 @@ fn bench_compare(c: &mut Criterion) {
     group.finish();
 }
 
-criterion_group!(benches, bench_run_match, bench_callgraph, bench_compare);
+fn bench_stats(c: &mut Criterion) {
+    let apk_path = vec![PathBuf::from("./co.kitetech.filemanager_old.apk")];
+    let filters: Vec<String> = vec![];
+
+    let mut group = c.benchmark_group("stats");
+    group.sample_size(1000);
+    group.bench_function("stats", |b| {
+        b.iter(|| {
+            handle_stats(
+                black_box(apk_path.clone()),
+                black_box(filters.clone()),
+                false,
+                StatsFormat::Printed,
+            )
+        });
+    });
+    group.finish();
+}
+
+criterion_group!(
+    benches,
+    bench_run_match,
+    bench_callgraph,
+    bench_compare,
+    bench_stats
+);
 criterion_main!(benches);
