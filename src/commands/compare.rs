@@ -2,6 +2,7 @@
 //! method-signature level and prints added / removed / changed methods.
 
 use crate::compare::{EditType, find_changes_between_classes, unpack_apk_classes};
+use crate::matching::{MatchParams, build_class_match_set};
 use crate::utils::build_regex;
 use rayon::iter::{IntoParallelRefIterator, ParallelIterator};
 use regex::Regex;
@@ -12,12 +13,14 @@ use std::path::PathBuf;
 use tracing::error;
 
 /// Compare the classes in `old_apk` and `new_apk` and print any additions,
-/// removals, or changes found.  An optional list of regex `filters` can
-/// restrict which classes are examined.
+/// removals, or changes found. An optional list of regex `filters` can
+/// restrict which classes are examined. When `match_obfuscated` is true,
+/// runs matching analysis first to pair classes across obfuscated names.
 pub fn handle_compare(
     old_apk: PathBuf,
     new_apk: PathBuf,
     filters: Vec<String>,
+    match_obfuscated: bool,
 ) -> Result<(), String> {
     let apks: Vec<Result<ApkFile, _>> = vec![old_apk, new_apk]
         .par_iter()
@@ -26,33 +29,29 @@ pub fn handle_compare(
     match (&apks[0], &apks[1]) {
         (Ok(old), Ok(new)) => {
             let regex: Vec<Regex> = build_regex(&filters);
-            let old_classes = unpack_apk_classes(old, &regex)
-                .par_iter()
-                .fold(
-                    FxHashMap::<String, SmaliClass>::default,
-                    |mut accum, item| {
-                        accum.insert(item.name.as_java_type(), item.clone());
-                        accum
-                    },
-                )
-                .reduce(FxHashMap::default, |mut accum, mut res| {
-                    accum.extend(res.drain());
-                    accum
-                });
-            let new_classes = unpack_apk_classes(new, &regex)
-                .par_iter()
-                .fold(
-                    FxHashMap::<String, SmaliClass>::default,
-                    |mut accum, item| {
-                        accum.insert(item.name.as_java_type(), item.clone());
-                        accum
-                    },
-                )
-                .reduce(FxHashMap::default, |mut accum, mut res| {
-                    accum.extend(res.drain());
-                    accum
-                });
-            let res = find_changes_between_classes(new_classes, old_classes);
+            let old_classes_vec = unpack_apk_classes(old, &regex);
+            let new_classes_vec = unpack_apk_classes(new, &regex);
+
+            let match_set = if match_obfuscated {
+                let params = MatchParams::default();
+                Some(build_class_match_set(
+                    &old_classes_vec,
+                    &new_classes_vec,
+                    &params,
+                ))
+            } else {
+                None
+            };
+
+            let old_classes: FxHashMap<String, SmaliClass> = old_classes_vec
+                .into_iter()
+                .map(|item| (item.name.as_java_type(), item))
+                .collect();
+            let new_classes: FxHashMap<String, SmaliClass> = new_classes_vec
+                .into_iter()
+                .map(|item| (item.name.as_java_type(), item))
+                .collect();
+            let res = find_changes_between_classes(new_classes, old_classes, match_set.as_ref());
             for x in res {
                 match x {
                     EditType::Change(x) => println!("CHANGED: {x}"),

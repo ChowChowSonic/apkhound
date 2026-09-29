@@ -3,6 +3,7 @@
 //! between them is also emitted (in `printed` and `json` formats).
 
 use crate::compare::unpack_apk_classes;
+use crate::matching::{MatchParams, build_class_match_set};
 use crate::stats::{
     ApkStats, ChangeCoverage, ChangeCoverageStats, MetricDiff, StatsDiff, compute_change_coverage,
     compute_stats, diff_stats,
@@ -59,6 +60,7 @@ pub fn handle_stats(
     filters: Vec<String>,
     graph: bool,
     format: StatsFormat,
+    match_obfuscated: bool,
 ) -> Result<(), String> {
     let regex: Vec<Regex> = build_regex(&filters);
 
@@ -87,6 +89,21 @@ pub fn handle_stats(
         })
         .collect();
 
+    if analyses.len() < 2 && match_obfuscated {
+        tracing::info!("--match-obfuscated passed with a single APK; skipping matching analysis");
+    }
+
+    let match_set = if match_obfuscated && analyses.len() == 2 {
+        let params = MatchParams::default();
+        Some(build_class_match_set(
+            &analyses[0].classes,
+            &analyses[1].classes,
+            &params,
+        ))
+    } else {
+        None
+    };
+
     match format {
         StatsFormat::Printed => {
             // Compute the diff and change coverage *before* printing anything
@@ -97,6 +114,7 @@ pub fn handle_stats(
                     Some(compute_change_coverage(
                         &analyses[0].classes,
                         &analyses[1].classes,
+                        match_set.as_ref(),
                     )),
                 )
             } else {
@@ -121,6 +139,7 @@ pub fn handle_stats(
                 Some(compute_change_coverage(
                     &analyses[0].classes,
                     &analyses[1].classes,
+                    match_set.as_ref(),
                 ))
             } else {
                 None
@@ -276,7 +295,7 @@ fn diff_row(out: &mut String, key: &str, d: &MetricDiff) {
 }
 
 /// Render [`ChangeCoverageStats`] as an aligned table.  `percent_changed` is
-/// the share of distinct units (across both APKs) whose body changed.
+/// the share of distinct units (across both APKs) whose body or header changed.
 fn format_change_coverage_printed(cov: &ChangeCoverageStats) -> String {
     let mut out = String::new();
     out.push_str("--- Change coverage (old -> new) ---\n");
@@ -286,8 +305,34 @@ fn format_change_coverage_printed(cov: &ChangeCoverageStats) -> String {
     ));
     coverage_row(&mut out, "classes", &cov.classes);
     coverage_row(&mut out, "methods", &cov.methods);
+    coverage_row(&mut out, "  by instructions", &cov.methods_by_instruction);
+    coverage_row(&mut out, "  by headers", &cov.methods_by_header);
     coverage_row(&mut out, "instructions", &cov.instructions);
     out.push('\n');
+
+    out.push_str("--- Method change breakdown ---\n");
+    kv(
+        &mut out,
+        "Changed by instructions only",
+        &cov.method_breakdown.instructions_only.to_string(),
+    );
+    kv(
+        &mut out,
+        "Changed by headers only",
+        &cov.method_breakdown.headers_only.to_string(),
+    );
+    kv(
+        &mut out,
+        "Changed by both",
+        &cov.method_breakdown.both.to_string(),
+    );
+    kv(
+        &mut out,
+        "Total modified methods",
+        &cov.method_breakdown.total_modified.to_string(),
+    );
+    out.push('\n');
+
     out
 }
 
@@ -370,7 +415,7 @@ fn flatten_stats(s: &ApkStats) -> Vec<(String, String)> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::stats::{CallGraphStats, OpcodeStats};
+    use crate::stats::{CallGraphStats, MethodChangeBreakdown, OpcodeStats};
     use std::collections::BTreeMap;
 
     fn sample_stats(path: &str) -> ApkStats {
@@ -488,6 +533,34 @@ mod tests {
                 changed: 110,
                 percent_changed: 110.0 / 560.0 * 100.0,
             },
+            methods_by_instruction: ChangeCoverage {
+                old_total: 500,
+                new_total: 540,
+                added: 60,
+                removed: 20,
+                modified: 25,
+                unchanged: 455,
+                union_total: 560,
+                changed: 105,
+                percent_changed: 105.0 / 560.0 * 100.0,
+            },
+            methods_by_header: ChangeCoverage {
+                old_total: 500,
+                new_total: 540,
+                added: 60,
+                removed: 20,
+                modified: 10,
+                unchanged: 470,
+                union_total: 560,
+                changed: 90,
+                percent_changed: 90.0 / 560.0 * 100.0,
+            },
+            method_breakdown: MethodChangeBreakdown {
+                instructions_only: 20,
+                headers_only: 5,
+                both: 5,
+                total_modified: 30,
+            },
             instructions: ChangeCoverage {
                 old_total: 9000,
                 new_total: 9500,
@@ -504,10 +577,17 @@ mod tests {
         assert!(text.contains("--- Change coverage (old -> new) ---"));
         assert!(text.contains("classes"));
         assert!(text.contains("methods"));
+        assert!(text.contains("by instructions"));
+        assert!(text.contains("by headers"));
         assert!(text.contains("instructions"));
         assert!(text.contains("16.96%")); // 19 / 112
         assert!(text.contains("19.64%")); // 110 / 560
         assert!(text.contains("15.00%"));
+        assert!(text.contains("--- Method change breakdown ---"));
+        assert!(text.contains("Changed by instructions only"));
+        assert!(text.contains("Changed by headers only"));
+        assert!(text.contains("Changed by both"));
+        assert!(text.contains("Total modified methods"));
     }
 
     #[test]

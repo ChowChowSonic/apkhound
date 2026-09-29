@@ -8,9 +8,14 @@ use std::path::PathBuf;
 use tracing::error;
 
 /// If `new_apk` is provided, diff the permissions between both APKs and
-/// print added / deleted permissions.  Otherwise print every
-/// `uses-permission` from the single APK.
-pub fn handle_permissions(old_apk: PathBuf, new_apk: Option<PathBuf>) -> Result<(), String> {
+/// print added / deleted permissions. Otherwise print every
+/// `uses-permission` from the single APK. When `match_obfuscated` is true,
+/// runs matching analysis first on both APKs.
+pub fn handle_permissions(
+    old_apk: PathBuf,
+    new_apk: Option<PathBuf>,
+    match_obfuscated: bool,
+) -> Result<(), String> {
     if let Some(new_res) = new_apk {
         let apks: Vec<Result<ApkFile, _>> = vec![old_apk, new_res]
             .par_iter()
@@ -18,6 +23,16 @@ pub fn handle_permissions(old_apk: PathBuf, new_apk: Option<PathBuf>) -> Result<
             .collect();
         match (&apks[0], &apks[1]) {
             (Ok(old), Ok(new)) => {
+                if match_obfuscated {
+                    let match_params = crate::matching::MatchParams::default();
+                    let old_classes = crate::compare::unpack_apk_classes(old, &[]);
+                    let new_classes = crate::compare::unpack_apk_classes(new, &[]);
+                    let _match_set = crate::matching::build_class_match_set(
+                        &old_classes,
+                        &new_classes,
+                        &match_params,
+                    );
+                }
                 let (deleted, added) = compare_manifest_permissions(old, new);
                 for x in deleted {
                     println!("DELETED: {x}");

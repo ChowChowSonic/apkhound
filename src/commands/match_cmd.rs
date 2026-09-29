@@ -2,7 +2,7 @@
 //! between packages in two APKs and displays a results table or CSV.
 
 use crate::compare::unpack_apk_classes;
-use crate::matching::{MatchParams, MatchResult, pkg_display, run_match};
+use crate::matching::{MatchParams, MatchResult, compute_match_summary, pkg_display, run_match};
 use crate::utils::build_regex;
 use rayon::iter::{IntoParallelRefIterator, ParallelIterator};
 use regex::Regex;
@@ -22,6 +22,9 @@ pub struct MatchConfig {
     pub api_weight: f64,
     pub hier_weight: f64,
     pub string_weight: f64,
+    pub match_obfuscated: bool,
+    pub summary: bool,
+    pub score_only: bool,
 }
 
 /// Run package matching between two APKs and output the results as either a
@@ -47,15 +50,23 @@ pub fn handle_match(old_apk: PathBuf, new_apk: PathBuf, cfg: MatchConfig) -> Res
                 hier_weight: cfg.hier_weight,
                 string_weight: cfg.string_weight,
             };
+            let match_result = run_match(&old_classes, &new_classes, &match_params);
+
+            if cfg.score_only {
+                let summary = compute_match_summary(&match_result);
+                println!("{:.4}", summary.app_change_distance);
+                return Ok(());
+            }
+
             let MatchResult {
                 results,
                 old_pkg_methods,
                 new_pkg_methods,
-            } = run_match(&old_classes, &new_classes, &match_params);
+            } = &match_result;
 
             if cfg.csv {
                 println!("old_package,new_package,score,status");
-                for (old_name, new_name, score, status) in &results {
+                for (old_name, new_name, score, status) in results {
                     let score_str = if *score <= 0.0 {
                         "---".to_string()
                     } else {
@@ -69,7 +80,7 @@ pub fn handle_match(old_apk: PathBuf, new_apk: PathBuf, cfg: MatchConfig) -> Res
                         status
                     );
                 }
-            } else {
+            } else if !cfg.summary {
                 let disp_rows: Vec<(String, String, String, &str)> = results
                     .iter()
                     .map(|(on, nn, score, status)| {
@@ -150,7 +161,7 @@ pub fn handle_match(old_apk: PathBuf, new_apk: PathBuf, cfg: MatchConfig) -> Res
 
                 if cfg.show_details {
                     println!();
-                    for (old_name, new_name, score, status) in &results {
+                    for (old_name, new_name, score, status) in results {
                         let score_str = if *score <= 0.0 {
                             "---".to_string()
                         } else {
@@ -179,6 +190,120 @@ pub fn handle_match(old_apk: PathBuf, new_apk: PathBuf, cfg: MatchConfig) -> Res
                             }
                         }
                     }
+                }
+            }
+
+            if cfg.summary {
+                let summary = compute_match_summary(&match_result);
+                if cfg.csv {
+                    println!();
+                    println!(
+                        "# Summary: Algorithm = Weisfeiler-Lehman (WL) Graph Kernel + API & String Jaccard"
+                    );
+                    println!(
+                        "# Methodology: Method-weighted package similarity, where weight = max(old_methods, new_methods), change_distance = 1.0 - similarity"
+                    );
+                    println!("metric,value");
+                    println!("change_distance,{:.4}", summary.app_change_distance);
+                    println!("similarity_score,{:.4}", summary.app_similarity_score);
+                    println!("unweighted_similarity,{:.4}", summary.unweighted_similarity);
+                    println!("packages_total_union,{}", summary.packages_total_union);
+                    println!("packages_matched,{}", summary.matched_packages);
+                    println!("packages_changed,{}", summary.changed_packages);
+                    println!("packages_removed,{}", summary.removed_packages);
+                    println!("packages_added,{}", summary.added_packages);
+                    println!(
+                        "packages_matched_pct,{:.2}%",
+                        summary.packages_matched_ratio * 100.0
+                    );
+                    println!(
+                        "packages_changed_pct,{:.2}%",
+                        summary.packages_changed_ratio * 100.0
+                    );
+                    println!(
+                        "packages_removed_pct,{:.2}%",
+                        summary.packages_removed_ratio * 100.0
+                    );
+                    println!(
+                        "packages_added_pct,{:.2}%",
+                        summary.packages_added_ratio * 100.0
+                    );
+                    println!(
+                        "code_in_matched_pct,{:.2}%",
+                        summary.code_in_matched_ratio * 100.0
+                    );
+                    println!(
+                        "code_in_changed_pct,{:.2}%",
+                        summary.code_in_changed_ratio * 100.0
+                    );
+                    println!(
+                        "code_in_removed_pct,{:.2}%",
+                        summary.code_in_removed_ratio * 100.0
+                    );
+                    println!(
+                        "code_in_added_pct,{:.2}%",
+                        summary.code_in_added_ratio * 100.0
+                    );
+                } else {
+                    println!("============================================================");
+                    println!("                  APPLICATION CHANGE SUMMARY                ");
+                    println!("============================================================");
+                    println!(
+                        "  Algorithm:   Weisfeiler-Lehman (WL) Graph Kernel + API & String Jaccard"
+                    );
+                    println!("  Methodology: Method-weighted package similarity, where:");
+                    println!("               • Package weight = max(old_methods, new_methods)");
+                    println!(
+                        "               • Weighted similarity = sum(score_i * weight_i) / sum(weight_i)"
+                    );
+                    println!(
+                        "               • Change distance = 1.0 - weighted_similarity (0.0 = identical, 1.0 = disjoint)"
+                    );
+                    println!("------------------------------------------------------------");
+                    println!(
+                        "  Overall change distance:    {:.4} ({:.2}% changed)",
+                        summary.app_change_distance,
+                        summary.app_change_distance * 100.0
+                    );
+                    println!(
+                        "  Overall similarity score:   {:.4} ({:.2}% similar)",
+                        summary.app_similarity_score,
+                        summary.app_similarity_score * 100.0
+                    );
+                    println!(
+                        "  Unweighted mean similarity: {:.4}",
+                        summary.unweighted_similarity
+                    );
+                    println!();
+                    println!(
+                        "--- Package breakdown (union: {}) ---",
+                        summary.packages_total_union
+                    );
+                    println!(
+                        "  Matched: {:>6} ({:>6.2}% of pkgs | {:>6.2}% of code)",
+                        summary.matched_packages,
+                        summary.packages_matched_ratio * 100.0,
+                        summary.code_in_matched_ratio * 100.0
+                    );
+                    println!(
+                        "  Changed: {:>6} ({:>6.2}% of pkgs | {:>6.2}% of code)",
+                        summary.changed_packages,
+                        summary.packages_changed_ratio * 100.0,
+                        summary.code_in_changed_ratio * 100.0
+                    );
+                    println!(
+                        "  Removed: {:>6} ({:>6.2}% of pkgs | {:>6.2}% of code)",
+                        summary.removed_packages,
+                        summary.packages_removed_ratio * 100.0,
+                        summary.code_in_removed_ratio * 100.0
+                    );
+                    println!(
+                        "  Added:   {:>6} ({:>6.2}% of pkgs | {:>6.2}% of code)",
+                        summary.added_packages,
+                        summary.packages_added_ratio * 100.0,
+                        summary.code_in_added_ratio * 100.0
+                    );
+                    println!("============================================================");
                 }
             }
             Ok(())

@@ -15,7 +15,10 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::path::Path;
 
 use crate::callgraph::iterate_over_dex_files;
-use crate::compare::{construct_java_signature, functions_match};
+use crate::compare::{
+    construct_java_signature, functions_match, method_headers_match, method_rel_signature,
+};
+use crate::matching::ClassMatchSet;
 
 /// A single top-level package (everything before the last `.` in a Java
 /// type name) with the number of classes that live directly in it.
@@ -190,9 +193,10 @@ pub struct StatsDiff {
 /// Change coverage for a single unit type (classes, methods, instructions)
 /// measured between two APKs.
 ///
-/// A unit is *unchanged* when it exists in both APKs with an identical body
-/// (method bodies are compared opcode-by-opcode via
-/// [`functions_match`](crate::compare::functions_match)).  Everything else
+/// A method or instruction unit is *unchanged* when it exists in both APKs with
+/// an identical body and header. For classes, a class is *unchanged* when it exists
+/// in both APKs and has no added or removed functions (changes to function bodies
+/// or headers alone do not mark the class as changed). Everything else
 /// counts as *added* (only in the new APK), *removed* (only in the old APK),
 /// or *modified* (present in both but different).  `union_total` is the
 /// number of distinct units across both APKs, and `percent_changed` is
@@ -220,12 +224,29 @@ pub struct ChangeCoverage {
     pub percent_changed: f64,
 }
 
+/// Detailed breakdown of modified methods by what changed.
+#[derive(Debug, Clone, Default, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub struct MethodChangeBreakdown {
+    /// Methods whose instructions changed but header remained identical.
+    pub instructions_only: usize,
+    /// Methods whose header changed but instructions remained identical.
+    pub headers_only: usize,
+    /// Methods whose instructions and header both changed.
+    pub both: usize,
+    /// Total methods modified in both APKs (`instructions_only + headers_only + both`).
+    pub total_modified: usize,
+}
+
 /// Change coverage by unit type between two APKs.
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub struct ChangeCoverageStats {
     pub classes: ChangeCoverage,
     pub methods: ChangeCoverage,
+    pub methods_by_instruction: ChangeCoverage,
+    pub methods_by_header: ChangeCoverage,
+    pub method_breakdown: MethodChangeBreakdown,
     pub instructions: ChangeCoverage,
 }
 
@@ -712,9 +733,10 @@ fn finish_coverage(
 
 /// Core of [`compute_change_coverage`], operating on the already-unpacked
 /// class lists so it can be unit-tested without real APK files.
-fn change_coverage_from_classes(
+fn change_coverage_from_classes_with_match_set(
     old_classes: &[SmaliClass],
     new_classes: &[SmaliClass],
+    match_set: Option<&ClassMatchSet>,
 ) -> ChangeCoverageStats {
     // Class name -> class, for the class-level breakdown.
     let old_by_name: BTreeMap<String, &SmaliClass> = old_classes
@@ -726,28 +748,8 @@ fn change_coverage_from_classes(
         .map(|c| (c.name.as_java_type(), c))
         .collect();
 
-    // Method id -> (class, method): a method is identified by its full
-    // signature (`construct_java_signature`), exactly like `compare`.
-    let old_methods: BTreeMap<String, (&SmaliClass, &SmaliMethod)> = old_classes
-        .iter()
-        .flat_map(|class| {
-            let class_name = class.name.as_java_type();
-            class
-                .methods
-                .iter()
-                .map(move |m| (construct_java_signature(class_name.clone(), m), (class, m)))
-        })
-        .collect();
-    let new_methods: BTreeMap<String, (&SmaliClass, &SmaliMethod)> = new_classes
-        .iter()
-        .flat_map(|class| {
-            let class_name = class.name.as_java_type();
-            class
-                .methods
-                .iter()
-                .map(move |m| (construct_java_signature(class_name.clone(), m), (class, m)))
-        })
-        .collect();
+    let old_methods_len: usize = old_classes.iter().map(|c| c.methods.len()).sum();
+    let new_methods_len: usize = new_classes.iter().map(|c| c.methods.len()).sum();
 
     // Instruction totals over each APK.
     let old_instructions: usize = old_classes
@@ -761,10 +763,14 @@ fn change_coverage_from_classes(
         .map(method_instructions)
         .sum();
 
-    // Method-level breakdown.
     let mut added = 0usize;
     let mut removed = 0usize;
     let mut modified = 0usize;
+    let mut modified_by_instruction = 0usize;
+    let mut modified_by_header = 0usize;
+    let mut instructions_only = 0usize;
+    let mut headers_only = 0usize;
+    let mut both = 0usize;
     let mut added_ins = 0usize;
     let mut removed_ins = 0usize;
     let mut modified_old_ins = 0usize;
@@ -772,84 +778,211 @@ fn change_coverage_from_classes(
     let mut unchanged = 0usize;
     let mut unchanged_ins = 0usize;
 
-    let method_keys: BTreeSet<String> = old_methods
-        .keys()
-        .chain(new_methods.keys())
-        .cloned()
-        .collect();
-    for key in method_keys {
-        match (old_methods.get(&key), new_methods.get(&key)) {
-            (Some((_, old_m)), Some((_, new_m))) => {
-                if functions_match(old_m, new_m) {
-                    unchanged += 1;
-                    unchanged_ins += method_instructions(old_m);
-                } else {
-                    modified += 1;
-                    modified_old_ins += method_instructions(old_m);
-                    modified_new_ins += method_instructions(new_m);
-                }
-            }
-            (None, Some((_, new_m))) => {
-                added += 1;
-                added_ins += method_instructions(new_m);
-            }
-            (Some((_, old_m)), None) => {
-                removed += 1;
-                removed_ins += method_instructions(old_m);
-            }
-            (None, None) => unreachable!("key came from the union of both maps"),
-        }
-    }
-
-    // Class-level breakdown.
     let mut classes_added = 0usize;
     let mut classes_removed = 0usize;
     let mut classes_modified = 0usize;
     let mut classes_unchanged = 0usize;
 
-    let class_keys: BTreeSet<String> = old_by_name
-        .keys()
-        .chain(new_by_name.keys())
-        .cloned()
-        .collect();
-    for name in class_keys {
-        match (old_by_name.get(&name), new_by_name.get(&name)) {
-            (None, Some(_)) => classes_added += 1,
-            (Some(_), None) => classes_removed += 1,
-            (Some(old_c), Some(new_c)) => {
-                let old_sigs: BTreeSet<String> = old_c
+    if let Some(ms) = match_set {
+        for new_c in new_classes {
+            let new_name = new_c.name.as_java_type();
+            let old_name_opt = ms.new_to_old.get(&new_name).or_else(|| {
+                if old_by_name.contains_key(&new_name) {
+                    Some(&new_name)
+                } else {
+                    None
+                }
+            });
+
+            if let Some(old_name) = old_name_opt
+                && let Some(old_c) = old_by_name.get(old_name.as_str())
+            {
+                let old_m_map: FxHashMap<String, &SmaliMethod> = old_c
                     .methods
                     .iter()
-                    .map(|m| construct_java_signature(name.clone(), m))
+                    .map(|m| (method_rel_signature(m), m))
                     .collect();
-                let new_sigs: BTreeSet<String> = new_c
+                let new_m_map: FxHashMap<String, &SmaliMethod> = new_c
                     .methods
                     .iter()
-                    .map(|m| construct_java_signature(name.clone(), m))
+                    .map(|m| (method_rel_signature(m), m))
                     .collect();
 
-                let mut class_modified = old_sigs != new_sigs;
-                if !class_modified {
-                    for new_m in &new_c.methods {
-                        let sig = construct_java_signature(name.clone(), new_m);
-                        let old_m = old_c
-                            .methods
-                            .iter()
-                            .find(|om| construct_java_signature(name.clone(), om) == sig)
-                            .expect("signature sets are equal");
-                        if !functions_match(old_m, new_m) {
-                            class_modified = true;
-                            break;
+                let mut class_has_added_or_removed_method = false;
+
+                for new_m in &new_c.methods {
+                    let rel_sig = method_rel_signature(new_m);
+                    if let Some(old_m) = old_m_map.get(&rel_sig) {
+                        let ins_match = functions_match(old_m, new_m);
+                        let header_match = method_headers_match(old_m, new_m);
+                        if ins_match && header_match {
+                            unchanged += 1;
+                            unchanged_ins += method_instructions(old_m);
+                        } else {
+                            modified += 1;
+                            if !ins_match {
+                                modified_by_instruction += 1;
+                                modified_old_ins += method_instructions(old_m);
+                                modified_new_ins += method_instructions(new_m);
+                            } else {
+                                unchanged_ins += method_instructions(old_m);
+                            }
+                            if !header_match {
+                                modified_by_header += 1;
+                            }
+                            if !ins_match && header_match {
+                                instructions_only += 1;
+                            } else if ins_match && !header_match {
+                                headers_only += 1;
+                            } else {
+                                both += 1;
+                            }
                         }
+                    } else {
+                        added += 1;
+                        added_ins += method_instructions(new_m);
+                        class_has_added_or_removed_method = true;
                     }
                 }
-                if class_modified {
+
+                for old_m in &old_c.methods {
+                    let rel_sig = method_rel_signature(old_m);
+                    if !new_m_map.contains_key(&rel_sig) {
+                        removed += 1;
+                        removed_ins += method_instructions(old_m);
+                        class_has_added_or_removed_method = true;
+                    }
+                }
+
+                if class_has_added_or_removed_method {
                     classes_modified += 1;
                 } else {
                     classes_unchanged += 1;
                 }
+            } else {
+                classes_added += 1;
+                for new_m in &new_c.methods {
+                    added += 1;
+                    added_ins += method_instructions(new_m);
+                }
             }
-            (None, None) => unreachable!("key came from the union of both maps"),
+        }
+
+        for old_c in old_classes {
+            let old_name = old_c.name.as_java_type();
+            let is_paired = ms
+                .old_to_new
+                .get(&old_name)
+                .is_some_and(|nn| new_by_name.contains_key(nn))
+                || new_by_name.contains_key(&old_name);
+            if !is_paired {
+                classes_removed += 1;
+                for old_m in &old_c.methods {
+                    removed += 1;
+                    removed_ins += method_instructions(old_m);
+                }
+            }
+        }
+    } else {
+        // Method id -> (class, method): a method is identified by its full
+        // signature (`construct_java_signature`), exactly like `compare`.
+        let old_methods: BTreeMap<String, (&SmaliClass, &SmaliMethod)> = old_classes
+            .iter()
+            .flat_map(|class| {
+                let class_name = class.name.as_java_type();
+                class
+                    .methods
+                    .iter()
+                    .map(move |m| (construct_java_signature(class_name.clone(), m), (class, m)))
+            })
+            .collect();
+        let new_methods: BTreeMap<String, (&SmaliClass, &SmaliMethod)> = new_classes
+            .iter()
+            .flat_map(|class| {
+                let class_name = class.name.as_java_type();
+                class
+                    .methods
+                    .iter()
+                    .map(move |m| (construct_java_signature(class_name.clone(), m), (class, m)))
+            })
+            .collect();
+
+        let method_keys: BTreeSet<String> = old_methods
+            .keys()
+            .chain(new_methods.keys())
+            .cloned()
+            .collect();
+        for key in method_keys {
+            match (old_methods.get(&key), new_methods.get(&key)) {
+                (Some((_, old_m)), Some((_, new_m))) => {
+                    let ins_match = functions_match(old_m, new_m);
+                    let header_match = method_headers_match(old_m, new_m);
+                    if ins_match && header_match {
+                        unchanged += 1;
+                        unchanged_ins += method_instructions(old_m);
+                    } else {
+                        modified += 1;
+                        if !ins_match {
+                            modified_by_instruction += 1;
+                            modified_old_ins += method_instructions(old_m);
+                            modified_new_ins += method_instructions(new_m);
+                        } else {
+                            unchanged_ins += method_instructions(old_m);
+                        }
+                        if !header_match {
+                            modified_by_header += 1;
+                        }
+                        if !ins_match && header_match {
+                            instructions_only += 1;
+                        } else if ins_match && !header_match {
+                            headers_only += 1;
+                        } else {
+                            both += 1;
+                        }
+                    }
+                }
+                (None, Some((_, new_m))) => {
+                    added += 1;
+                    added_ins += method_instructions(new_m);
+                }
+                (Some((_, old_m)), None) => {
+                    removed += 1;
+                    removed_ins += method_instructions(old_m);
+                }
+                (None, None) => unreachable!("key came from the union of both maps"),
+            }
+        }
+
+        let class_keys: BTreeSet<String> = old_by_name
+            .keys()
+            .chain(new_by_name.keys())
+            .cloned()
+            .collect();
+        for name in class_keys {
+            match (old_by_name.get(&name), new_by_name.get(&name)) {
+                (None, Some(_)) => classes_added += 1,
+                (Some(_), None) => classes_removed += 1,
+                (Some(old_c), Some(new_c)) => {
+                    let old_sigs: BTreeSet<String> = old_c
+                        .methods
+                        .iter()
+                        .map(|m| construct_java_signature(name.clone(), m))
+                        .collect();
+                    let new_sigs: BTreeSet<String> = new_c
+                        .methods
+                        .iter()
+                        .map(|m| construct_java_signature(name.clone(), m))
+                        .collect();
+
+                    let class_modified = old_sigs != new_sigs;
+                    if class_modified {
+                        classes_modified += 1;
+                    } else {
+                        classes_unchanged += 1;
+                    }
+                }
+                (None, None) => unreachable!("key came from the union of both maps"),
+            }
         }
     }
 
@@ -863,13 +996,35 @@ fn change_coverage_from_classes(
             classes_unchanged,
         ),
         methods: finish_coverage(
-            old_methods.len(),
-            new_methods.len(),
+            old_methods_len,
+            new_methods_len,
             added,
             removed,
             modified,
             unchanged,
         ),
+        methods_by_instruction: finish_coverage(
+            old_methods_len,
+            new_methods_len,
+            added,
+            removed,
+            modified_by_instruction,
+            unchanged + headers_only,
+        ),
+        methods_by_header: finish_coverage(
+            old_methods_len,
+            new_methods_len,
+            added,
+            removed,
+            modified_by_header,
+            unchanged + instructions_only,
+        ),
+        method_breakdown: MethodChangeBreakdown {
+            instructions_only,
+            headers_only,
+            both,
+            total_modified: modified,
+        },
         instructions: finish_coverage(
             old_instructions,
             new_instructions,
@@ -886,14 +1041,25 @@ fn change_coverage_from_classes(
 /// between the old and the new version.
 ///
 /// The lists must already be unpacked and filtered (the caller owns the
-/// unpacking so it happens exactly once per APK).  Method identity and
+/// unpacking so it happens exactly once per APK). Method identity and
 /// equality follow the `compare` command's rules (`construct_java_signature`
-/// + [`functions_match`](crate::compare::functions_match)).
+/// + [`crate::compare::functions_match`]).
+///
+/// When `match_set` is provided, paired classes are compared across obfuscated boundaries.
 pub fn compute_change_coverage(
     old_classes: &[SmaliClass],
     new_classes: &[SmaliClass],
+    match_set: Option<&ClassMatchSet>,
 ) -> ChangeCoverageStats {
-    change_coverage_from_classes(old_classes, new_classes)
+    change_coverage_from_classes_with_match_set(old_classes, new_classes, match_set)
+}
+
+#[cfg(test)]
+fn change_coverage_from_classes(
+    old_classes: &[SmaliClass],
+    new_classes: &[SmaliClass],
+) -> ChangeCoverageStats {
+    change_coverage_from_classes_with_match_set(old_classes, new_classes, None)
 }
 
 #[cfg(test)]
@@ -1327,8 +1493,12 @@ mod tests {
 
         let cov = change_coverage_from_classes(&[old], &[new]);
 
-        assert_eq!(cov.classes.modified, 1);
-        assert_eq!(cov.classes.unchanged, 0);
+        // A class only counts as changed if the class was added/removed or a function was added/removed.
+        // Method body modifications do not count as a class change.
+        assert_eq!(cov.classes.modified, 0);
+        assert_eq!(cov.classes.unchanged, 1);
+        assert_eq!(cov.classes.changed, 0);
+        assert_eq!(cov.classes.percent_changed, 0.0);
 
         assert_eq!(cov.methods.modified, 1);
         assert_eq!(cov.methods.unchanged, 0);
@@ -1383,11 +1553,11 @@ mod tests {
         assert_eq!(cov.classes.new_total, 3);
         assert_eq!(cov.classes.added, 1); // C
         assert_eq!(cov.classes.removed, 0);
-        assert_eq!(cov.classes.modified, 1); // B
-        assert_eq!(cov.classes.unchanged, 1); // A
+        assert_eq!(cov.classes.modified, 0); // B had method body changed, but no method added/removed
+        assert_eq!(cov.classes.unchanged, 2); // A, B
         assert_eq!(cov.classes.union_total, 3);
-        assert_eq!(cov.classes.changed, 2);
-        let classes_pct = 2.0 / 3.0 * 100.0;
+        assert_eq!(cov.classes.changed, 1);
+        let classes_pct = 1.0 / 3.0 * 100.0;
         assert!((cov.classes.percent_changed - classes_pct).abs() < 1e-9);
 
         assert_eq!(cov.methods.added, 1); // C.c1
@@ -1405,5 +1575,286 @@ mod tests {
         assert_eq!(cov.classes.percent_changed, 0.0);
         assert_eq!(cov.methods.union_total, 0);
         assert_eq!(cov.instructions.changed, 0);
+    }
+
+    #[test]
+    fn test_change_coverage_with_match_set() {
+        let old_cls = make_class(
+            "com.example.Service",
+            vec![make_method(
+                "start",
+                "()V",
+                vec![SmaliOp::Op(DexOp::ReturnVoid)],
+            )],
+        );
+        let new_cls = make_class(
+            "a.b.c",
+            vec![make_method(
+                "start",
+                "()V",
+                vec![SmaliOp::Op(DexOp::ReturnVoid)],
+            )],
+        );
+
+        // Without match_set: 1 added, 1 removed, 0 unchanged, 100% changed
+        let cov_no_match = change_coverage_from_classes_with_match_set(
+            std::slice::from_ref(&old_cls),
+            std::slice::from_ref(&new_cls),
+            None,
+        );
+        assert_eq!(cov_no_match.classes.unchanged, 0);
+        assert_eq!(cov_no_match.classes.percent_changed, 100.0);
+
+        // With match_set: 1 unchanged, 0% changed!
+        let mut match_set = ClassMatchSet::default();
+        match_set.insert("com.example.Service".to_string(), "a.b.c".to_string(), 0.95);
+
+        let cov_with_match =
+            change_coverage_from_classes_with_match_set(&[old_cls], &[new_cls], Some(&match_set));
+        assert_eq!(cov_with_match.classes.unchanged, 1);
+        assert_eq!(cov_with_match.classes.percent_changed, 0.0);
+        assert_eq!(cov_with_match.methods.unchanged, 1);
+        assert_eq!(cov_with_match.methods.percent_changed, 0.0);
+    }
+
+    #[test]
+    fn test_change_coverage_instruction_vs_header_breakdown() {
+        // m_unchanged: identical modifiers, identical ops
+        let mut m_unchanged_old =
+            make_method("unchanged", "()V", vec![SmaliOp::Op(DexOp::ReturnVoid)]);
+        m_unchanged_old.modifiers = vec![Modifier::Public];
+        let mut m_unchanged_new =
+            make_method("unchanged", "()V", vec![SmaliOp::Op(DexOp::ReturnVoid)]);
+        m_unchanged_new.modifiers = vec![Modifier::Public];
+
+        // m_ins_only: same modifier, different ops
+        let mut m_ins_old = make_method("insOnly", "()V", vec![SmaliOp::Op(DexOp::ReturnVoid)]);
+        m_ins_old.modifiers = vec![Modifier::Public];
+        let mut m_ins_new = make_method(
+            "insOnly",
+            "()V",
+            vec![invoke("helper"), SmaliOp::Op(DexOp::ReturnVoid)],
+        );
+        m_ins_new.modifiers = vec![Modifier::Public];
+
+        // m_hdr_only: different modifier, same ops
+        let mut m_hdr_old = make_method("hdrOnly", "()V", vec![SmaliOp::Op(DexOp::ReturnVoid)]);
+        m_hdr_old.modifiers = vec![Modifier::Public];
+        let mut m_hdr_new = make_method("hdrOnly", "()V", vec![SmaliOp::Op(DexOp::ReturnVoid)]);
+        m_hdr_new.modifiers = vec![Modifier::Private];
+
+        // m_both: different modifier and different ops
+        let mut m_both_old = make_method("both", "()V", vec![SmaliOp::Op(DexOp::ReturnVoid)]);
+        m_both_old.modifiers = vec![Modifier::Public];
+        let mut m_both_new = make_method(
+            "both",
+            "()V",
+            vec![invoke("helper"), SmaliOp::Op(DexOp::ReturnVoid)],
+        );
+        m_both_new.modifiers = vec![Modifier::Private];
+
+        let old_cls = make_class(
+            "com.example.Foo",
+            vec![m_unchanged_old, m_ins_old, m_hdr_old, m_both_old],
+        );
+        let new_cls = make_class(
+            "com.example.Foo",
+            vec![m_unchanged_new, m_ins_new, m_hdr_new, m_both_new],
+        );
+
+        let cov = change_coverage_from_classes(
+            std::slice::from_ref(&old_cls),
+            std::slice::from_ref(&new_cls),
+        );
+
+        // Overall methods: 4 total, 3 modified (insOnly, hdrOnly, both), 1 unchanged
+        assert_eq!(cov.methods.old_total, 4);
+        assert_eq!(cov.methods.new_total, 4);
+        assert_eq!(cov.methods.added, 0);
+        assert_eq!(cov.methods.removed, 0);
+        assert_eq!(cov.methods.modified, 3);
+        assert_eq!(cov.methods.unchanged, 1);
+        assert_eq!(cov.methods.union_total, 4);
+        assert_eq!(cov.methods.changed, 3);
+        assert_eq!(cov.methods.percent_changed, 75.0);
+
+        // Breakdown:
+        assert_eq!(cov.method_breakdown.instructions_only, 1);
+        assert_eq!(cov.method_breakdown.headers_only, 1);
+        assert_eq!(cov.method_breakdown.both, 1);
+        assert_eq!(cov.method_breakdown.total_modified, 3);
+
+        // By instructions: 2 modified (insOnly + both), 2 unchanged (unchanged + hdrOnly)
+        assert_eq!(cov.methods_by_instruction.modified, 2);
+        assert_eq!(cov.methods_by_instruction.unchanged, 2);
+        assert_eq!(cov.methods_by_instruction.union_total, 4);
+        assert_eq!(cov.methods_by_instruction.percent_changed, 50.0);
+
+        // By headers: 2 modified (hdrOnly + both), 2 unchanged (unchanged + insOnly)
+        assert_eq!(cov.methods_by_header.modified, 2);
+        assert_eq!(cov.methods_by_header.unchanged, 2);
+        assert_eq!(cov.methods_by_header.union_total, 4);
+        assert_eq!(cov.methods_by_header.percent_changed, 50.0);
+
+        // Classes: Foo has 4 methods in both old and new, none added or removed -> unchanged.
+        assert_eq!(cov.classes.modified, 0);
+        assert_eq!(cov.classes.unchanged, 1);
+        assert_eq!(cov.classes.changed, 0);
+        assert_eq!(cov.classes.percent_changed, 0.0);
+    }
+
+    #[test]
+    fn test_class_only_changes_on_add_or_remove_function() {
+        // Case 1: Method modified only (body or header) -> class unchanged
+        let cls_body_mod_old = make_class(
+            "com.example.BodyMod",
+            vec![make_method(
+                "m",
+                "()V",
+                vec![SmaliOp::Op(DexOp::ReturnVoid)],
+            )],
+        );
+        let cls_body_mod_new = make_class(
+            "com.example.BodyMod",
+            vec![make_method(
+                "m",
+                "()V",
+                vec![invoke("call"), SmaliOp::Op(DexOp::ReturnVoid)],
+            )],
+        );
+
+        let mut m_hdr_old = make_method("h", "()V", vec![SmaliOp::Op(DexOp::ReturnVoid)]);
+        m_hdr_old.modifiers = vec![Modifier::Public];
+        let mut m_hdr_new = make_method("h", "()V", vec![SmaliOp::Op(DexOp::ReturnVoid)]);
+        m_hdr_new.modifiers = vec![Modifier::Private];
+
+        let cls_hdr_mod_old = make_class("com.example.HdrMod", vec![m_hdr_old]);
+        let cls_hdr_mod_new = make_class("com.example.HdrMod", vec![m_hdr_new]);
+
+        // Case 2: Method added to class -> class modified
+        let cls_method_added_old = make_class(
+            "com.example.MethodAdd",
+            vec![make_method(
+                "m1",
+                "()V",
+                vec![SmaliOp::Op(DexOp::ReturnVoid)],
+            )],
+        );
+        let cls_method_added_new = make_class(
+            "com.example.MethodAdd",
+            vec![
+                make_method("m1", "()V", vec![SmaliOp::Op(DexOp::ReturnVoid)]),
+                make_method("m2", "()V", vec![SmaliOp::Op(DexOp::ReturnVoid)]),
+            ],
+        );
+
+        // Case 3: Method removed from class -> class modified
+        let cls_method_rem_old = make_class(
+            "com.example.MethodRem",
+            vec![
+                make_method("m1", "()V", vec![SmaliOp::Op(DexOp::ReturnVoid)]),
+                make_method("m2", "()V", vec![SmaliOp::Op(DexOp::ReturnVoid)]),
+            ],
+        );
+        let cls_method_rem_new = make_class(
+            "com.example.MethodRem",
+            vec![make_method(
+                "m1",
+                "()V",
+                vec![SmaliOp::Op(DexOp::ReturnVoid)],
+            )],
+        );
+
+        // Case 4: Class itself added
+        let cls_added_new = make_class(
+            "com.example.ClassAdd",
+            vec![make_method(
+                "a",
+                "()V",
+                vec![SmaliOp::Op(DexOp::ReturnVoid)],
+            )],
+        );
+
+        // Case 5: Class itself removed
+        let cls_rem_old = make_class(
+            "com.example.ClassRem",
+            vec![make_method(
+                "r",
+                "()V",
+                vec![SmaliOp::Op(DexOp::ReturnVoid)],
+            )],
+        );
+
+        let old_classes = vec![
+            cls_body_mod_old,
+            cls_hdr_mod_old,
+            cls_method_added_old,
+            cls_method_rem_old,
+            cls_rem_old,
+        ];
+        let new_classes = vec![
+            cls_body_mod_new,
+            cls_hdr_mod_new,
+            cls_method_added_new,
+            cls_method_rem_new,
+            cls_added_new,
+        ];
+
+        // 1. Without match set
+        let cov = change_coverage_from_classes(&old_classes, &new_classes);
+        // Classes:
+        // - BodyMod: unchanged (no functions added/removed)
+        // - HdrMod: unchanged (no functions added/removed)
+        // - MethodAdd: modified (function added)
+        // - MethodRem: modified (function removed)
+        // - ClassAdd: added
+        // - ClassRem: removed
+        assert_eq!(cov.classes.old_total, 5);
+        assert_eq!(cov.classes.new_total, 5);
+        assert_eq!(cov.classes.added, 1);
+        assert_eq!(cov.classes.removed, 1);
+        assert_eq!(cov.classes.modified, 2);
+        assert_eq!(cov.classes.unchanged, 2);
+        assert_eq!(cov.classes.union_total, 6);
+        assert_eq!(cov.classes.changed, 4); // added(1) + removed(1) + modified(2)
+        assert!((cov.classes.percent_changed - (4.0 / 6.0 * 100.0)).abs() < 1e-9);
+
+        // 2. With obfuscation match set where names are mapped
+        let mut match_set = ClassMatchSet::default();
+        match_set.insert(
+            "com.example.BodyMod".into(),
+            "com.example.BodyMod".into(),
+            1.0,
+        );
+        match_set.insert(
+            "com.example.HdrMod".into(),
+            "com.example.HdrMod".into(),
+            1.0,
+        );
+        match_set.insert(
+            "com.example.MethodAdd".into(),
+            "com.example.MethodAdd".into(),
+            1.0,
+        );
+        match_set.insert(
+            "com.example.MethodRem".into(),
+            "com.example.MethodRem".into(),
+            1.0,
+        );
+
+        let cov_match = change_coverage_from_classes_with_match_set(
+            &old_classes,
+            &new_classes,
+            Some(&match_set),
+        );
+        assert_eq!(cov_match.classes.old_total, 5);
+        assert_eq!(cov_match.classes.new_total, 5);
+        assert_eq!(cov_match.classes.added, 1);
+        assert_eq!(cov_match.classes.removed, 1);
+        assert_eq!(cov_match.classes.modified, 2);
+        assert_eq!(cov_match.classes.unchanged, 2);
+        assert_eq!(cov_match.classes.union_total, 6);
+        assert_eq!(cov_match.classes.changed, 4);
+        assert!((cov_match.classes.percent_changed - (4.0 / 6.0 * 100.0)).abs() < 1e-9);
     }
 }

@@ -16,6 +16,9 @@ enum Commands {
         /// Regex filter for class names (can be specified multiple times)
         #[arg(short = 'f', long = "filterclass")]
         filters: Vec<String>,
+        /// Run matching analysis between APKs first and use matched classes as source of truth
+        #[arg(long = "match-obfuscated")]
+        match_obfuscated: bool,
     },
     /// Compare two APKs and list class-level additions, removals, and changes
     Compare {
@@ -26,6 +29,9 @@ enum Commands {
         /// Regex filter for class names (can be specified multiple times)
         #[arg(short = 'f', long = "filterclass")]
         filters: Vec<String>,
+        /// Run matching analysis between APKs first and use matched classes as source of truth
+        #[arg(long = "match-obfuscated")]
+        match_obfuscated: bool,
     },
     /// Extract changed method smali to a directory
     Extract {
@@ -41,6 +47,9 @@ enum Commands {
         /// Regex filter for method signatures (can be specified multiple times)
         #[arg(short = 's', long = "filtersmali")]
         smali_filters: Vec<String>,
+        /// Run matching analysis between APKs first and use matched classes as source of truth
+        #[arg(long = "match-obfuscated")]
+        match_obfuscated: bool,
     },
     /// Trace call paths between methods matching two regexes
     Trace {
@@ -58,6 +67,9 @@ enum Commands {
         format: Format,
         /// Paths to the APK files
         apks: Vec<PathBuf>,
+        /// Run matching analysis between APKs first and use matched classes as source of truth
+        #[arg(long = "match-obfuscated")]
+        match_obfuscated: bool,
     },
     /// Match packages across two APKs using graph isomorphism
     #[command(name = "match")]
@@ -96,17 +108,32 @@ enum Commands {
         /// Weight of string-constant fingerprint in combined score (0.0 = disabled)
         #[arg(long = "string-weight", default_value_t = 0.3)]
         string_weight: f64,
+        /// Run matching analysis between APKs first and use matched classes as source of truth
+        #[arg(long = "match-obfuscated")]
+        match_obfuscated: bool,
+        /// Output application change summary metrics (outputs only the summary unless a format like --csv is specified)
+        #[arg(long = "summary")]
+        summary: bool,
+        /// Output only the overall change scalar (float in [0.0, 1.0]), ideal for scripting
+        #[arg(long = "score-only")]
+        score_only: bool,
     },
     /// Compare manifest permissions between two APKs, or list permissions of one
     Permissions {
         old_apk: PathBuf,
         new_apk: Option<PathBuf>,
+        /// Run matching analysis between APKs first and use matched classes as source of truth
+        #[arg(long = "match-obfuscated")]
+        match_obfuscated: bool,
     },
     /// Extract and display AndroidManifest in a choice of formats
     Manifest {
         apk_path: PathBuf,
         #[arg(value_enum, default_value_t = commands::manifest::Format::Printed)]
         format: commands::manifest::Format,
+        /// Run matching analysis between APKs first and use matched classes as source of truth
+        #[arg(long = "match-obfuscated")]
+        match_obfuscated: bool,
     },
     /// Compute statistics for one or two APK files (diffs them when both given)
     Stats {
@@ -122,6 +149,9 @@ enum Commands {
         /// Output format
         #[arg(value_enum, long = "format", default_value_t = commands::stats::StatsFormat::Printed)]
         format: commands::stats::StatsFormat,
+        /// Run matching analysis between APKs first and use matched classes as source of truth
+        #[arg(long = "match-obfuscated")]
+        match_obfuscated: bool,
     },
 }
 
@@ -131,26 +161,31 @@ fn main() {
         .init();
     let args = Commands::parse();
     let result = match args {
-        Commands::Callgraph { apk_path, filters } => {
-            commands::callgraph::handle_callgraph(apk_path, filters)
-        }
+        Commands::Callgraph {
+            apk_path,
+            filters,
+            match_obfuscated,
+        } => commands::callgraph::handle_callgraph(apk_path, filters, match_obfuscated),
         Commands::Compare {
             old_apk,
             new_apk,
             filters,
-        } => commands::compare::handle_compare(old_apk, new_apk, filters),
+            match_obfuscated,
+        } => commands::compare::handle_compare(old_apk, new_apk, filters, match_obfuscated),
         Commands::Extract {
             old_apk,
             new_apk,
             output_dir,
             class_filters,
             smali_filters,
+            match_obfuscated,
         } => commands::extract::handle_extract(
             old_apk,
             new_apk,
             output_dir,
             class_filters,
             smali_filters,
+            match_obfuscated,
         ),
         Commands::Trace {
             src_regex,
@@ -159,6 +194,7 @@ fn main() {
             dest_from_file,
             format,
             apks,
+            match_obfuscated,
         } => commands::trace::handle_trace(
             src_regex,
             dest_regex,
@@ -166,6 +202,7 @@ fn main() {
             dest_from_file,
             format,
             apks,
+            match_obfuscated,
         ),
         Commands::Match {
             old_apk,
@@ -180,6 +217,9 @@ fn main() {
             api_weight,
             hier_weight,
             string_weight,
+            match_obfuscated,
+            summary,
+            score_only,
         } => commands::match_cmd::handle_match(
             old_apk,
             new_apk,
@@ -194,20 +234,28 @@ fn main() {
                 api_weight,
                 hier_weight,
                 string_weight,
+                match_obfuscated,
+                summary,
+                score_only,
             },
         ),
-        Commands::Permissions { old_apk, new_apk } => {
-            commands::permissions::handle_permissions(old_apk, new_apk)
-        }
-        Commands::Manifest { apk_path, format } => {
-            commands::manifest::handle_manifest(apk_path, format)
-        }
+        Commands::Permissions {
+            old_apk,
+            new_apk,
+            match_obfuscated,
+        } => commands::permissions::handle_permissions(old_apk, new_apk, match_obfuscated),
+        Commands::Manifest {
+            apk_path,
+            format,
+            match_obfuscated,
+        } => commands::manifest::handle_manifest(apk_path, format, match_obfuscated),
         Commands::Stats {
             apks,
             filters,
             graph,
             format,
-        } => commands::stats::handle_stats(apks, filters, graph, format),
+            match_obfuscated,
+        } => commands::stats::handle_stats(apks, filters, graph, format, match_obfuscated),
     };
     if let Err(e) = result {
         eprintln!("error: {e}");

@@ -1,12 +1,13 @@
 //! APK comparison logic — extract classes from two APKs, diff them at the
 //! method-signature level, and optionally dump changed smali to disk.
 
+use crate::matching::ClassMatchSet;
 use rayon::prelude::*;
 use regex::Regex;
 use rustc_hash::FxHashMap;
 use smali::android::zip::is_top_level_dex_name;
-use smali::types::SmaliMethod;
-use smali::{android::zip::ApkFile, dex::DexFile, types::SmaliClass, types::SmaliOp};
+use smali::types::{SmaliClass, SmaliMethod, SmaliOp};
+use smali::{android::zip::ApkFile, dex::DexFile};
 use std::fs::{File, create_dir_all};
 use std::hash::{Hash, Hasher};
 use std::io::prelude::*;
@@ -36,6 +37,17 @@ pub fn construct_java_signature(class: String, m: &SmaliMethod) -> String {
     )
 }
 
+/// Build a method signature relative to its class (return type, name, and arguments).
+pub fn method_rel_signature(m: &SmaliMethod) -> String {
+    let argslist: Vec<String> = m.signature.args.iter().map(|item| item.to_java()).collect();
+    format!(
+        "{} {}({:?})",
+        m.signature.result.to_java(),
+        m.name,
+        argslist
+    )
+}
+
 fn method_filename(m: &SmaliMethod) -> String {
     let safe_name = m.name.replace(['<', '>'], "");
     let args: Vec<String> = m.signature.args.iter().map(|t| t.to_java()).collect();
@@ -51,13 +63,15 @@ fn method_filename(m: &SmaliMethod) -> String {
 }
 
 /// For each changed / added / removed method, write the old and new smali to
-/// `output_dir/{old,new}/...`.  An optional list of `filters` restricts
-/// which smali lines are written.
+/// `output_dir/{old,new}/...`. An optional list of `filters` restricts
+/// which smali lines are written. When `match_set` is provided, paired classes
+/// are compared across obfuscated boundaries.
 pub fn dump_changes_between_classes(
     new_classes: FxHashMap<String, SmaliClass>,
     old_classes: FxHashMap<String, SmaliClass>,
     output_dir_buf: &Path,
     filters: &[Regex],
+    match_set: Option<&ClassMatchSet>,
 ) -> Result<(), std::io::Error> {
     let new_root = output_dir_buf.join("new");
     let old_root = output_dir_buf.join("old");
@@ -75,137 +89,305 @@ pub fn dump_changes_between_classes(
             .join("\n")
     };
 
-    for (key, class) in &new_classes {
-        let class_dir = key.replace(".", std::path::MAIN_SEPARATOR_STR);
+    if let Some(ms) = match_set {
+        for (new_key, class) in &new_classes {
+            let new_class_dir = new_key.replace(".", std::path::MAIN_SEPARATOR_STR);
+            let old_key_opt = ms.new_to_old.get(new_key).or_else(|| {
+                if old_classes.contains_key(new_key) {
+                    Some(new_key)
+                } else {
+                    None
+                }
+            });
 
-        if let Some(old_class) = old_classes.get(key) {
-            let old_methods: FxHashMap<String, &SmaliMethod> = old_class
-                .methods
-                .iter()
-                .map(|m| (construct_java_signature(key.clone(), m), m))
-                .collect();
+            if let Some(old_key) = old_key_opt
+                && let Some(old_class) = old_classes.get(old_key)
+            {
+                let old_class_dir = old_key.replace(".", std::path::MAIN_SEPARATOR_STR);
+                let old_methods: FxHashMap<String, &SmaliMethod> = old_class
+                    .methods
+                    .iter()
+                    .map(|m| (method_rel_signature(m), m))
+                    .collect();
 
-            for new_method in &class.methods {
-                let sig = construct_java_signature(key.clone(), new_method);
+                for new_method in &class.methods {
+                    let rel_sig = method_rel_signature(new_method);
+                    match old_methods.get(&rel_sig) {
+                        Some(old_method) if !functions_match(old_method, new_method) => {
+                            let old_dir = old_root.join(&old_class_dir);
+                            let new_dir = new_root.join(&new_class_dir);
+                            create_dir_all(&old_dir)?;
+                            create_dir_all(&new_dir)?;
 
-                match old_methods.get(&sig) {
-                    Some(old_method) if !functions_match(old_method, new_method) => {
-                        let old_dir = old_root.join(&class_dir);
-                        let new_dir = new_root.join(&class_dir);
+                            let fname = method_filename(new_method);
+                            let mut f = File::create(new_dir.join(&fname))?;
+                            write!(f, "{}", filtered_smali(new_method))?;
+
+                            let fname = method_filename(old_method);
+                            let mut f = File::create(old_dir.join(&fname))?;
+                            write!(f, "{}", filtered_smali(old_method))?;
+                        }
+                        None => {
+                            let new_dir = new_root.join(&new_class_dir);
+                            create_dir_all(&new_dir)?;
+                            let fname = method_filename(new_method);
+                            let mut f = File::create(new_dir.join(&fname))?;
+                            write!(f, "{}", filtered_smali(new_method))?;
+                        }
+                        _ => {}
+                    }
+                }
+
+                for old_method in &old_class.methods {
+                    let rel_sig = method_rel_signature(old_method);
+                    if !class
+                        .methods
+                        .iter()
+                        .any(|m| method_rel_signature(m) == rel_sig)
+                    {
+                        let old_dir = old_root.join(&old_class_dir);
                         create_dir_all(&old_dir)?;
-                        create_dir_all(&new_dir)?;
-
-                        let fname = method_filename(new_method);
-                        let mut f = File::create(new_dir.join(&fname))?;
-                        write!(f, "{}", filtered_smali(new_method))?;
-
                         let fname = method_filename(old_method);
                         let mut f = File::create(old_dir.join(&fname))?;
                         write!(f, "{}", filtered_smali(old_method))?;
                     }
-                    None => {
-                        let new_dir = new_root.join(&class_dir);
-                        create_dir_all(&new_dir)?;
-                        let fname = method_filename(new_method);
-                        let mut f = File::create(new_dir.join(&fname))?;
-                        write!(f, "{}", filtered_smali(new_method))?;
-                    }
-                    _ => {}
+                }
+            } else {
+                let new_dir = new_root.join(&new_class_dir);
+                for new_method in &class.methods {
+                    create_dir_all(&new_dir)?;
+                    let fname = method_filename(new_method);
+                    let mut f = File::create(new_dir.join(&fname))?;
+                    write!(f, "{}", filtered_smali(new_method))?;
                 }
             }
+        }
 
-            for old_method in &old_class.methods {
-                let sig = construct_java_signature(key.clone(), old_method);
-                if !class
-                    .methods
-                    .iter()
-                    .any(|m| construct_java_signature(key.clone(), m) == sig)
-                {
-                    let old_dir = old_root.join(&class_dir);
+        for (old_key, old_class) in &old_classes {
+            let is_paired = ms
+                .old_to_new
+                .get(old_key)
+                .is_some_and(|nk| new_classes.contains_key(nk))
+                || new_classes.contains_key(old_key);
+            if !is_paired {
+                let class_dir = old_key.replace(".", std::path::MAIN_SEPARATOR_STR);
+                let old_dir = old_root.join(&class_dir);
+                for old_method in &old_class.methods {
                     create_dir_all(&old_dir)?;
                     let fname = method_filename(old_method);
                     let mut f = File::create(old_dir.join(&fname))?;
                     write!(f, "{}", filtered_smali(old_method))?;
                 }
             }
-        } else {
-            let new_dir = new_root.join(&class_dir);
-            for new_method in &class.methods {
-                create_dir_all(&new_dir)?;
-                let fname = method_filename(new_method);
-                let mut f = File::create(new_dir.join(&fname))?;
-                write!(f, "{}", filtered_smali(new_method))?;
+        }
+    } else {
+        for (key, class) in &new_classes {
+            let class_dir = key.replace(".", std::path::MAIN_SEPARATOR_STR);
+
+            if let Some(old_class) = old_classes.get(key) {
+                let old_methods: FxHashMap<String, &SmaliMethod> = old_class
+                    .methods
+                    .iter()
+                    .map(|m| (construct_java_signature(key.clone(), m), m))
+                    .collect();
+
+                for new_method in &class.methods {
+                    let sig = construct_java_signature(key.clone(), new_method);
+
+                    match old_methods.get(&sig) {
+                        Some(old_method) if !functions_match(old_method, new_method) => {
+                            let old_dir = old_root.join(&class_dir);
+                            let new_dir = new_root.join(&class_dir);
+                            create_dir_all(&old_dir)?;
+                            create_dir_all(&new_dir)?;
+
+                            let fname = method_filename(new_method);
+                            let mut f = File::create(new_dir.join(&fname))?;
+                            write!(f, "{}", filtered_smali(new_method))?;
+
+                            let fname = method_filename(old_method);
+                            let mut f = File::create(old_dir.join(&fname))?;
+                            write!(f, "{}", filtered_smali(old_method))?;
+                        }
+                        None => {
+                            let new_dir = new_root.join(&class_dir);
+                            create_dir_all(&new_dir)?;
+                            let fname = method_filename(new_method);
+                            let mut f = File::create(new_dir.join(&fname))?;
+                            write!(f, "{}", filtered_smali(new_method))?;
+                        }
+                        _ => {}
+                    }
+                }
+
+                for old_method in &old_class.methods {
+                    let sig = construct_java_signature(key.clone(), old_method);
+                    if !class
+                        .methods
+                        .iter()
+                        .any(|m| construct_java_signature(key.clone(), m) == sig)
+                    {
+                        let old_dir = old_root.join(&class_dir);
+                        create_dir_all(&old_dir)?;
+                        let fname = method_filename(old_method);
+                        let mut f = File::create(old_dir.join(&fname))?;
+                        write!(f, "{}", filtered_smali(old_method))?;
+                    }
+                }
+            } else {
+                let new_dir = new_root.join(&class_dir);
+                for new_method in &class.methods {
+                    create_dir_all(&new_dir)?;
+                    let fname = method_filename(new_method);
+                    let mut f = File::create(new_dir.join(&fname))?;
+                    write!(f, "{}", filtered_smali(new_method))?;
+                }
             }
         }
-    }
-    for (key, old_class) in &old_classes {
-        if !new_classes.contains_key(key) {
-            let class_dir = key.replace(".", std::path::MAIN_SEPARATOR_STR);
-            let old_dir = old_root.join(&class_dir);
-            for old_method in &old_class.methods {
-                create_dir_all(&old_dir)?;
-                let fname = method_filename(old_method);
-                let mut f = File::create(old_dir.join(&fname))?;
-                write!(f, "{}", filtered_smali(old_method))?;
+        for (key, old_class) in &old_classes {
+            if !new_classes.contains_key(key) {
+                let class_dir = key.replace(".", std::path::MAIN_SEPARATOR_STR);
+                let old_dir = old_root.join(&class_dir);
+                for old_method in &old_class.methods {
+                    create_dir_all(&old_dir)?;
+                    let fname = method_filename(old_method);
+                    let mut f = File::create(old_dir.join(&fname))?;
+                    write!(f, "{}", filtered_smali(old_method))?;
+                }
             }
         }
     }
     Ok(())
 }
+
 /// Compare two sets of classes (keyed by Java type name) and return a list
 /// of `EditType` values describing every change, addition, or removal at
-/// the method-signature level.
+/// the method-signature level. When `match_set` is provided, paired classes
+/// are compared across obfuscated boundaries.
 pub fn find_changes_between_classes(
     new_classes: FxHashMap<String, SmaliClass>,
     old_classes: FxHashMap<String, SmaliClass>,
+    match_set: Option<&ClassMatchSet>,
 ) -> Vec<EditType> {
     let mut res: Vec<EditType> = Vec::new();
-    for (key, class) in &new_classes {
-        if let Some(old_class) = old_classes.get(key) {
-            let old_methods: FxHashMap<String, &SmaliMethod> = old_class
-                .methods
-                .iter()
-                .map(|m| (construct_java_signature(key.clone(), m), m))
-                .collect();
-            for new_method in &class.methods {
-                let sig = construct_java_signature(key.clone(), new_method);
-                match old_methods.get(&sig) {
-                    Some(old_method) => {
-                        if !functions_match(old_method, new_method) {
-                            res.push(EditType::Change(sig));
-                        }
-                    }
-                    None => {
-                        res.push(EditType::Addition(sig));
-                    }
+
+    if let Some(ms) = match_set {
+        for (new_key, class) in &new_classes {
+            let old_key_opt = ms.new_to_old.get(new_key).or_else(|| {
+                if old_classes.contains_key(new_key) {
+                    Some(new_key)
+                } else {
+                    None
                 }
-            }
-            for old_method in &old_class.methods {
-                let sig = construct_java_signature(key.clone(), old_method);
-                if !class
+            });
+
+            if let Some(old_key) = old_key_opt
+                && let Some(old_class) = old_classes.get(old_key)
+            {
+                let old_methods: FxHashMap<String, &SmaliMethod> = old_class
                     .methods
                     .iter()
-                    .any(|m| construct_java_signature(key.clone(), m) == sig)
-                {
-                    res.push(EditType::Remove(sig));
+                    .map(|m| (method_rel_signature(m), m))
+                    .collect();
+                for new_method in &class.methods {
+                    let rel_sig = method_rel_signature(new_method);
+                    let sig = construct_java_signature(new_key.clone(), new_method);
+                    match old_methods.get(&rel_sig) {
+                        Some(old_method) => {
+                            if !functions_match(old_method, new_method) {
+                                res.push(EditType::Change(sig));
+                            }
+                        }
+                        None => {
+                            res.push(EditType::Addition(sig));
+                        }
+                    }
+                }
+                for old_method in &old_class.methods {
+                    let rel_sig = method_rel_signature(old_method);
+                    if !class
+                        .methods
+                        .iter()
+                        .any(|m| method_rel_signature(m) == rel_sig)
+                    {
+                        res.push(EditType::Remove(construct_java_signature(
+                            old_key.clone(),
+                            old_method,
+                        )));
+                    }
+                }
+            } else {
+                for new_method in &class.methods {
+                    res.push(EditType::Addition(construct_java_signature(
+                        new_key.clone(),
+                        new_method,
+                    )));
                 }
             }
-        } else {
-            for new_method in &class.methods {
-                res.push(EditType::Addition(construct_java_signature(
-                    key.clone(),
-                    new_method,
-                )));
+        }
+        for (old_key, old_class) in &old_classes {
+            let is_paired = ms
+                .old_to_new
+                .get(old_key)
+                .is_some_and(|nk| new_classes.contains_key(nk))
+                || new_classes.contains_key(old_key);
+            if !is_paired {
+                for old_method in &old_class.methods {
+                    res.push(EditType::Remove(construct_java_signature(
+                        old_key.clone(),
+                        old_method,
+                    )));
+                }
             }
         }
-    }
-    for (key, old_class) in &old_classes {
-        if !new_classes.contains_key(key) {
-            for old_method in &old_class.methods {
-                res.push(EditType::Remove(construct_java_signature(
-                    key.clone(),
-                    old_method,
-                )));
+    } else {
+        for (key, class) in &new_classes {
+            if let Some(old_class) = old_classes.get(key) {
+                let old_methods: FxHashMap<String, &SmaliMethod> = old_class
+                    .methods
+                    .iter()
+                    .map(|m| (construct_java_signature(key.clone(), m), m))
+                    .collect();
+                for new_method in &class.methods {
+                    let sig = construct_java_signature(key.clone(), new_method);
+                    match old_methods.get(&sig) {
+                        Some(old_method) => {
+                            if !functions_match(old_method, new_method) {
+                                res.push(EditType::Change(sig));
+                            }
+                        }
+                        None => {
+                            res.push(EditType::Addition(sig));
+                        }
+                    }
+                }
+                for old_method in &old_class.methods {
+                    let sig = construct_java_signature(key.clone(), old_method);
+                    if !class
+                        .methods
+                        .iter()
+                        .any(|m| construct_java_signature(key.clone(), m) == sig)
+                    {
+                        res.push(EditType::Remove(sig));
+                    }
+                }
+            } else {
+                for new_method in &class.methods {
+                    res.push(EditType::Addition(construct_java_signature(
+                        key.clone(),
+                        new_method,
+                    )));
+                }
+            }
+        }
+        for (key, old_class) in &old_classes {
+            if !new_classes.contains_key(key) {
+                for old_method in &old_class.methods {
+                    res.push(EditType::Remove(construct_java_signature(
+                        key.clone(),
+                        old_method,
+                    )));
+                }
             }
         }
     }
@@ -227,6 +409,40 @@ pub fn functions_match(old: &SmaliMethod, new: &SmaliMethod) -> bool {
             }
             _ => std::mem::discriminant(a) == std::mem::discriminant(b),
         })
+}
+
+/// Check whether two methods have matching headers (modifiers, constructor flag,
+/// registers, locals, signature, parameters, and annotations).
+pub fn method_headers_match(old: &SmaliMethod, new: &SmaliMethod) -> bool {
+    if old.constructor != new.constructor
+        || old.registers != new.registers
+        || old.locals != new.locals
+        || old.signature.to_jni() != new.signature.to_jni()
+    {
+        return false;
+    }
+
+    let mut old_mods: Vec<_> = old.modifiers.iter().map(|m| m.to_str()).collect();
+    old_mods.sort_unstable();
+    let mut new_mods: Vec<_> = new.modifiers.iter().map(|m| m.to_str()).collect();
+    new_mods.sort_unstable();
+    if old_mods != new_mods {
+        return false;
+    }
+
+    if old.params.len() != new.params.len()
+        || format!("{:?}", old.params) != format!("{:?}", new.params)
+    {
+        return false;
+    }
+
+    if old.annotations.len() != new.annotations.len()
+        || format!("{:?}", old.annotations) != format!("{:?}", new.annotations)
+    {
+        return false;
+    }
+
+    true
 }
 
 fn unpack_dex_file(dex: DexFile, filters: &[Regex], accum: &mut Vec<SmaliClass>) {
@@ -274,7 +490,7 @@ pub fn unpack_apk_classes(apk: &ApkFile, filters: &[Regex]) -> Vec<SmaliClass> {
 mod tests {
     use super::*;
     use smali::smali_ops::{DexOp, Label, MethodRef};
-    use smali::types::MethodSignature;
+    use smali::types::{MethodSignature, Modifier};
 
     fn make_method(name: &str, sig: &str, ops: Vec<SmaliOp>) -> SmaliMethod {
         SmaliMethod {
@@ -474,5 +690,104 @@ mod tests {
                 "different signatures should produce different hashed names"
             );
         }
+    }
+
+    #[test]
+    fn test_find_changes_with_match_set() {
+        use smali::types::ObjectIdentifier;
+
+        let make_class = |name: &str, methods: Vec<SmaliMethod>| SmaliClass {
+            name: ObjectIdentifier::from_java_type(name),
+            modifiers: vec![],
+            source: None,
+            super_class: ObjectIdentifier::from_java_type("java.lang.Object"),
+            implements: vec![],
+            annotations: vec![],
+            fields: vec![],
+            methods,
+            file_path: None,
+        };
+
+        let old_m = make_method("run", "()V", vec![SmaliOp::Op(DexOp::ReturnVoid)]);
+        let new_m = make_method(
+            "run",
+            "()V",
+            vec![SmaliOp::Op(DexOp::Nop), SmaliOp::Op(DexOp::ReturnVoid)],
+        );
+
+        let old_cls = make_class("com.example.OldClass", vec![old_m]);
+        let new_cls = make_class("a.b.c", vec![new_m]);
+
+        let mut old_map = FxHashMap::default();
+        old_map.insert("com.example.OldClass".to_string(), old_cls);
+
+        let mut new_map = FxHashMap::default();
+        new_map.insert("a.b.c".to_string(), new_cls);
+
+        // Without match_set: 1 removed, 1 added
+        let edits_no_match = find_changes_between_classes(new_map.clone(), old_map.clone(), None);
+        assert_eq!(edits_no_match.len(), 2);
+        assert!(
+            edits_no_match
+                .iter()
+                .any(|e| matches!(e, EditType::Remove(_)))
+        );
+        assert!(
+            edits_no_match
+                .iter()
+                .any(|e| matches!(e, EditType::Addition(_)))
+        );
+
+        // With match_set: 1 changed!
+        let mut match_set = ClassMatchSet::default();
+        match_set.insert("com.example.OldClass".to_string(), "a.b.c".to_string(), 0.9);
+
+        let edits_with_match = find_changes_between_classes(new_map, old_map, Some(&match_set));
+        assert_eq!(edits_with_match.len(), 1);
+        assert!(
+            edits_with_match
+                .iter()
+                .any(|e| matches!(e, EditType::Change(_)))
+        );
+    }
+
+    #[test]
+    fn test_method_headers_match_identical() {
+        let a = make_method("foo", "()V", vec![]);
+        let b = make_method("foo", "()V", vec![]);
+        assert!(method_headers_match(&a, &b));
+    }
+
+    #[test]
+    fn test_method_headers_match_different_modifiers() {
+        let mut a = make_method("foo", "()V", vec![]);
+        a.modifiers = vec![Modifier::Public];
+        let mut b = make_method("foo", "()V", vec![]);
+        b.modifiers = vec![Modifier::Private];
+        assert!(!method_headers_match(&a, &b));
+
+        // Order independence
+        let mut c = make_method("foo", "()V", vec![]);
+        c.modifiers = vec![Modifier::Static, Modifier::Public];
+        let mut d = make_method("foo", "()V", vec![]);
+        d.modifiers = vec![Modifier::Public, Modifier::Static];
+        assert!(method_headers_match(&c, &d));
+    }
+
+    #[test]
+    fn test_method_headers_match_different_constructor() {
+        let mut a = make_method("foo", "()V", vec![]);
+        a.constructor = true;
+        let b = make_method("foo", "()V", vec![]);
+        assert!(!method_headers_match(&a, &b));
+    }
+
+    #[test]
+    fn test_method_headers_match_different_registers() {
+        let mut a = make_method("foo", "()V", vec![]);
+        a.registers = Some(4);
+        let mut b = make_method("foo", "()V", vec![]);
+        b.registers = Some(8);
+        assert!(!method_headers_match(&a, &b));
     }
 }

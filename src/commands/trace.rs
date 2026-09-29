@@ -220,15 +220,58 @@ pub fn handle_trace(
     dest_from_file: bool,
     format: Format,
     apks: Vec<PathBuf>,
+    match_obfuscated: bool,
 ) -> Result<(), String> {
     let start_patterns = resolve_patterns(&start_regex, src_from_file)?;
     let end_patterns = resolve_patterns(&end_regex, dest_from_file)?;
-    let start_regs = compile_patterns(&start_patterns);
-    let end_regs = compile_patterns(&end_patterns);
     let files: Vec<ApkFile> = apks
         .par_iter()
         .filter_map(|x| ApkFile::from_file(x).ok())
         .collect::<Vec<ApkFile>>();
+
+    let (start_regs, end_regs) = if match_obfuscated && files.len() >= 2 {
+        let match_params = crate::matching::MatchParams::default();
+        let old_classes = crate::compare::unpack_apk_classes(&files[0], &[]);
+        let new_classes = crate::compare::unpack_apk_classes(&files[1], &[]);
+        let match_set =
+            crate::matching::build_class_match_set(&old_classes, &new_classes, &match_params);
+
+        let mut extended_start_patterns = start_patterns.clone();
+        let mut extended_end_patterns = end_patterns.clone();
+
+        for m in &match_set.matches {
+            for p in &start_patterns {
+                if p.contains(&m.old_class) {
+                    extended_start_patterns.push(p.replace(&m.old_class, &m.new_class));
+                }
+            }
+            for p in &end_patterns {
+                if p.contains(&m.old_class) {
+                    extended_end_patterns.push(p.replace(&m.old_class, &m.new_class));
+                }
+            }
+        }
+        extended_start_patterns.sort();
+        extended_start_patterns.dedup();
+        extended_end_patterns.sort();
+        extended_end_patterns.dedup();
+
+        (
+            compile_patterns(&extended_start_patterns),
+            compile_patterns(&extended_end_patterns),
+        )
+    } else {
+        if match_obfuscated && files.len() < 2 {
+            tracing::info!(
+                "--match-obfuscated specified with fewer than 2 APKs; skipping matching analysis"
+            );
+        }
+        (
+            compile_patterns(&start_patterns),
+            compile_patterns(&end_patterns),
+        )
+    };
+
     let start_maps: Vec<FxHashMap<String, Vec<String>>> = files
         .par_iter()
         .map(|x| iterate_over_dex_files(x, &[]))
@@ -551,6 +594,7 @@ mod tests {
             false,
             Format::Printed,
             vec![],
+            false,
         );
     }
 
@@ -564,6 +608,7 @@ mod tests {
             false,
             Format::Printed,
             vec![],
+            false,
         );
     }
 
@@ -578,6 +623,7 @@ mod tests {
             false,
             Format::Printed,
             vec![PathBuf::from("/nonexistent/does-not-exist.apk")],
+            false,
         );
         assert!(result.is_ok());
     }
@@ -591,7 +637,8 @@ mod tests {
                 false,
                 false,
                 Format::Printed,
-                vec![]
+                vec![],
+                false,
             )
             .is_ok()
         );

@@ -25,7 +25,16 @@ pub enum Format {
 
 /// Extract the `AndroidManifest.xml` from an APK and print it in the
 /// requested `format`.
-pub fn handle_manifest(apk_path: PathBuf, format: Format) -> Result<(), String> {
+pub fn handle_manifest(
+    apk_path: PathBuf,
+    format: Format,
+    match_obfuscated: bool,
+) -> Result<(), String> {
+    if match_obfuscated {
+        tracing::info!(
+            "--match-obfuscated specified for manifest command (single APK); proceeding with manifest extraction"
+        );
+    }
     let apk = ApkFile::from_file(apk_path).map_err(|e| {
         error!("Unable to open APK file due to reason: {e}");
         format!("Unable to open APK file due to reason: {e}")

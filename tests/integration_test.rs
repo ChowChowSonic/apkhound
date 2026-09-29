@@ -4,7 +4,12 @@ use std::process::Command;
 
 fn apk_path(name: &str) -> Option<PathBuf> {
     let p = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join(name);
-    (p.exists() && is_valid_apk(&p)).then_some(p)
+    if p.exists() && is_valid_apk(&p) {
+        return Some(p);
+    }
+    let alt_name = name.replacen('_', "@", 1);
+    let alt_p = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join(alt_name);
+    (alt_p.exists() && is_valid_apk(&alt_p)).then_some(alt_p)
 }
 
 fn is_valid_apk(path: &Path) -> bool {
@@ -185,6 +190,80 @@ fn test_match_csv() {
     assert!(output.status.success());
     let stdout = String::from_utf8_lossy(&output.stdout);
     assert!(stdout.contains("old_package,new_package,score,status"));
+}
+
+#[test]
+fn test_match_score_only() {
+    let old = apk_path("org.videolan.vlc_3.5.4.apk");
+    let new = apk_path("org.videolan.vlc_3.7.1.apk");
+    if old.is_none() || new.is_none() {
+        eprintln!("skipping test_match_score_only: APK files not found");
+        return;
+    }
+    let output = Command::new(binary_path())
+        .arg("match")
+        .arg(old.unwrap())
+        .arg(new.unwrap())
+        .arg("--score-only")
+        .output()
+        .expect("failed to run apkhound match --score-only");
+    assert!(output.status.success());
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let trimmed = stdout.trim();
+    let score: f64 = trimmed
+        .parse()
+        .expect("score-only output must parse as float");
+    assert!((0.0..=1.0).contains(&score), "score must be in [0.0, 1.0]");
+}
+
+#[test]
+fn test_match_summary() {
+    let old = apk_path("org.videolan.vlc_3.5.4.apk");
+    let new = apk_path("org.videolan.vlc_3.7.1.apk");
+    if old.is_none() || new.is_none() {
+        eprintln!("skipping test_match_summary: APK files not found");
+        return;
+    }
+    let output = Command::new(binary_path())
+        .arg("match")
+        .arg(old.unwrap())
+        .arg(new.unwrap())
+        .arg("--summary")
+        .output()
+        .expect("failed to run apkhound match --summary");
+    assert!(output.status.success());
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(stdout.contains("APPLICATION CHANGE SUMMARY"));
+    assert!(stdout.contains("Algorithm:   Weisfeiler-Lehman (WL) Graph Kernel"));
+    assert!(stdout.contains("Overall change distance:"));
+    assert!(stdout.contains("Overall similarity score:"));
+    assert!(stdout.contains("Package breakdown"));
+    // When --summary is passed alone without a format like --csv, table should be omitted
+    assert!(!stdout.contains("Package (old)"));
+}
+
+#[test]
+fn test_match_summary_csv() {
+    let old = apk_path("org.videolan.vlc_3.5.4.apk");
+    let new = apk_path("org.videolan.vlc_3.7.1.apk");
+    if old.is_none() || new.is_none() {
+        eprintln!("skipping test_match_summary_csv: APK files not found");
+        return;
+    }
+    let output = Command::new(binary_path())
+        .arg("match")
+        .arg(old.unwrap())
+        .arg(new.unwrap())
+        .arg("--summary")
+        .arg("--csv")
+        .output()
+        .expect("failed to run apkhound match --summary --csv");
+    assert!(output.status.success());
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    // When a format like --csv is specified with --summary, both CSV packages and summary are included
+    assert!(stdout.contains("old_package,new_package,score,status"));
+    assert!(stdout.contains("# Summary: Algorithm = Weisfeiler-Lehman"));
+    assert!(stdout.contains("change_distance,"));
 }
 
 #[test]
@@ -421,7 +500,38 @@ fn test_stats_diff() {
     assert!(stdout.contains("Diff (old -> new)"));
     assert!(stdout.contains("classes"));
     assert!(stdout.contains("Change coverage (old -> new)"));
+    assert!(stdout.contains("by instructions"));
+    assert!(stdout.contains("by headers"));
+    assert!(stdout.contains("Method change breakdown"));
+    assert!(stdout.contains("Changed by instructions only"));
+    assert!(stdout.contains("Changed by headers only"));
     assert!(stdout.contains("%changed"));
+}
+
+#[test]
+fn test_stats_diff_json() {
+    let old = apk_path("org.videolan.vlc_3.5.4.apk");
+    let new = apk_path("org.videolan.vlc_3.7.1.apk");
+    if old.is_none() || new.is_none() {
+        eprintln!("skipping test_stats_diff_json: APK files not found");
+        return;
+    }
+    let output = Command::new(binary_path())
+        .arg("stats")
+        .arg("--format")
+        .arg("json")
+        .arg(old.unwrap())
+        .arg(new.unwrap())
+        .output()
+        .expect("failed to run apkhound stats diff json");
+    assert!(output.status.success());
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(stdout.contains("\"methods_by_instruction\""));
+    assert!(stdout.contains("\"methods_by_header\""));
+    assert!(stdout.contains("\"method_breakdown\""));
+    assert!(stdout.contains("\"instructions_only\""));
+    assert!(stdout.contains("\"headers_only\""));
+    assert!(stdout.contains("\"both\""));
 }
 
 #[test]
@@ -454,4 +564,100 @@ fn test_help() {
     assert!(stdout.contains("extract"));
     assert!(stdout.contains("trace"));
     assert!(stdout.contains("stats"));
+}
+
+#[test]
+fn test_subcommands_support_match_obfuscated_flag() {
+    let subcommands = [
+        "callgraph",
+        "compare",
+        "extract",
+        "trace",
+        "match",
+        "permissions",
+        "manifest",
+        "stats",
+    ];
+
+    for subcmd in subcommands {
+        let output = Command::new(binary_path())
+            .arg(subcmd)
+            .arg("--help")
+            .output()
+            .unwrap_or_else(|e| panic!("failed to run apkhound {} --help: {}", subcmd, e));
+        assert!(
+            output.status.success(),
+            "apkhound {} --help exited with failure",
+            subcmd
+        );
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        assert!(
+            stdout.contains("--match-obfuscated"),
+            "apkhound {} --help does not mention --match-obfuscated:\n{}",
+            subcmd,
+            stdout
+        );
+    }
+}
+
+#[test]
+fn test_compare_match_obfuscated() {
+    let old = apk_path("org.videolan.vlc_3.5.4.apk");
+    let new = apk_path("org.videolan.vlc_3.7.1.apk");
+    if old.is_none() || new.is_none() {
+        eprintln!("skipping test_compare_match_obfuscated: APK files not found");
+        return;
+    }
+    let output = Command::new(binary_path())
+        .arg("compare")
+        .arg("--match-obfuscated")
+        .arg(old.unwrap())
+        .arg(new.unwrap())
+        .output()
+        .expect("failed to run apkhound compare --match-obfuscated");
+    assert!(output.status.success());
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        stdout.contains("ADDED:") || stdout.contains("REMOVED:") || stdout.contains("CHANGED:")
+    );
+}
+
+#[test]
+fn test_stats_diff_match_obfuscated() {
+    let old = apk_path("org.videolan.vlc_3.5.4.apk");
+    let new = apk_path("org.videolan.vlc_3.7.1.apk");
+    if old.is_none() || new.is_none() {
+        eprintln!("skipping test_stats_diff_match_obfuscated: APK files not found");
+        return;
+    }
+    let output = Command::new(binary_path())
+        .arg("stats")
+        .arg("--match-obfuscated")
+        .arg(old.unwrap())
+        .arg(new.unwrap())
+        .output()
+        .expect("failed to run apkhound stats --match-obfuscated");
+    assert!(output.status.success());
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(stdout.contains("Diff (old -> new)"));
+    assert!(stdout.contains("Change coverage (old -> new)"));
+}
+
+#[test]
+fn test_match_obfuscated_single_apk_graceful() {
+    let apk = apk_path("org.videolan.vlc_3.7.1.apk");
+    if apk.is_none() {
+        eprintln!("skipping test_match_obfuscated_single_apk_graceful: APK not found");
+        return;
+    }
+    let output = Command::new(binary_path())
+        .arg("manifest")
+        .arg("--match-obfuscated")
+        .arg(apk.unwrap())
+        .arg("printed")
+        .output()
+        .expect("failed to run apkhound manifest --match-obfuscated");
+    assert!(output.status.success());
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(stdout.contains("ANDROID MANIFEST"));
 }

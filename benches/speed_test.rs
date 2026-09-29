@@ -20,6 +20,9 @@ fn bench_run_match(c: &mut Criterion) {
         api_weight: 0.2,
         hier_weight: 0.7,
         string_weight: 0.3,
+        match_obfuscated: false,
+        summary: false,
+        score_only: false,
     };
 
     let mut group = c.benchmark_group("run_match");
@@ -43,7 +46,13 @@ fn bench_callgraph(c: &mut Criterion) {
     let mut group = c.benchmark_group("callgraph");
     group.sample_size(1000);
     group.bench_function("callgraph", |b| {
-        b.iter(|| handle_callgraph(black_box(apk_path.clone()), black_box(filters.clone())));
+        b.iter(|| {
+            handle_callgraph(
+                black_box(apk_path.clone()),
+                black_box(filters.clone()),
+                false,
+            )
+        });
     });
     group.finish();
 }
@@ -61,6 +70,7 @@ fn bench_compare(c: &mut Criterion) {
                 black_box(old_apk.clone()),
                 black_box(new_apk.clone()),
                 black_box(filters.clone()),
+                false,
             )
         });
     });
@@ -80,6 +90,7 @@ fn bench_stats(c: &mut Criterion) {
                 black_box(filters.clone()),
                 false,
                 StatsFormat::Printed,
+                false,
             )
         });
     });
