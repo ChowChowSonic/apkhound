@@ -2,7 +2,9 @@
 //! between packages in two APKs and displays a results table or CSV.
 
 use crate::compare::unpack_apk_classes;
-use crate::matching::{MatchParams, MatchResult, compute_match_summary, pkg_display, run_match};
+use crate::matching::{
+    Feature, MatchParams, MatchResult, compute_match_summary, pkg_display, run_match,
+};
 use crate::utils::build_regex;
 use rayon::iter::{IntoParallelRefIterator, ParallelIterator};
 use regex::Regex;
@@ -25,6 +27,7 @@ pub struct MatchConfig {
     pub match_obfuscated: bool,
     pub summary: bool,
     pub score_only: bool,
+    pub exclude_features: Vec<Feature>,
 }
 
 /// Run package matching between two APKs and output the results as either a
@@ -49,6 +52,7 @@ pub fn handle_match(old_apk: PathBuf, new_apk: PathBuf, cfg: MatchConfig) -> Res
                 api_weight: cfg.api_weight,
                 hier_weight: cfg.hier_weight,
                 string_weight: cfg.string_weight,
+                excluded_features: cfg.exclude_features,
             };
             let match_result = run_match(&old_classes, &new_classes, &match_params);
 

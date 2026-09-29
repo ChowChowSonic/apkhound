@@ -180,6 +180,7 @@ apkhound match <old_apk> <new_apk> [options]
 | `--csv` | `false` | Output as CSV instead of a formatted table |
 | `-d`, `--show-details` | `false` | Show per-package method counts |
 | `--node-matching` | `false` | Enable node-label consistency check for more precise matching |
+| `--exclude-feature` | — | Exclude scoring features from the combined score. Accepts coarse components (`wl`, `api`, `string`, `hier`), individual WL feature dimensions (`in_degree`, `out_degree`, `ext_android`, `invoke_virtual`, `num_params`, `num_instructions`, `has_branches`, `string_consts`, `field_access`, `try_catch`, `register_count`, `is_constructor`, `return_type`, ...), and API-call categories (`api_android`, `api_androidx`, `api_java`, `api_kotlin`, `api_other`). Repeatable or comma-separated; excluding a coarse component renormalizes the remaining weights to sum to 1, excluding a WL dimension masks it before label hashing, and excluding an API category drops those calls from the API fingerprint (and masks the matching `ext_*` dimension) |
 | `-f`, `--filterclass` | — | Regex filter for class names (repeatable) |
 | `--summary` | `false` | Display overall application change distance and multi-scalar summary (outputs ONLY the summary unless a format like `--csv` is specified) |
 | `--score-only` | `false` | Output only the overall change scalar (float in `[0.0, 1.0]`), ideal for CI/scripts |
@@ -417,7 +418,7 @@ The `stats` command provides quantitative change coverage between two APK versio
 ## Testing & Benchmarks
 
 ```bash
-# Unit tests (141 tests across lib modules)
+# Unit tests (155 tests across lib modules)
 cargo test --lib
 
 # Integration tests (requires VLC APKs — downloaded in CI)

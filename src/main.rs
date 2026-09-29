@@ -117,6 +117,11 @@ enum Commands {
         /// Output only the overall change scalar (float in [0.0, 1.0]), ideal for scripting
         #[arg(long = "score-only")]
         score_only: bool,
+        /// Exclude scoring features from the combined score: coarse components (wl, api, string, hier),
+        /// WL feature dimensions (in_degree, num_params, has_branches, ...), or API categories
+        /// (api_android, api_androidx, api_java, api_kotlin, api_other). Repeatable or comma-separated.
+        #[arg(long = "exclude-feature", value_delimiter = ',')]
+        exclude_features: Vec<apkhound::matching::Feature>,
     },
     /// Compare manifest permissions between two APKs, or list permissions of one
     Permissions {
@@ -220,6 +225,7 @@ fn main() {
             match_obfuscated,
             summary,
             score_only,
+            exclude_features,
         } => commands::match_cmd::handle_match(
             old_apk,
             new_apk,
@@ -237,6 +243,7 @@ fn main() {
                 match_obfuscated,
                 summary,
                 score_only,
+                exclude_features,
             },
         ),
         Commands::Permissions {

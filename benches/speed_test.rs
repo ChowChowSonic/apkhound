@@ -2,6 +2,7 @@ use apkhound::commands::callgraph::handle_callgraph;
 use apkhound::commands::compare::handle_compare;
 use apkhound::commands::match_cmd::{MatchConfig, handle_match};
 use apkhound::commands::stats::{StatsFormat, handle_stats};
+use apkhound::matching::Feature;
 use criterion::{Criterion, criterion_group, criterion_main};
 use std::hint::black_box;
 use std::path::PathBuf;
@@ -23,6 +24,7 @@ fn bench_run_match(c: &mut Criterion) {
         match_obfuscated: false,
         summary: false,
         score_only: false,
+        exclude_features: vec![Feature::Hier],
     };
 
     let mut group = c.benchmark_group("run_match");
