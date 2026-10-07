@@ -3,7 +3,8 @@
 
 use crate::compare::unpack_apk_classes;
 use crate::matching::{
-    Feature, MatchParams, MatchResult, compute_match_summary, pkg_display, run_match,
+    ClassMatchDebug, Feature, MatchParams, MatchResult, PackageMatchDebug, compute_match_summary,
+    compute_package_debug_info, debug_class_matches, pkg_display, run_match,
 };
 use crate::utils::build_regex;
 use rayon::iter::{IntoParallelRefIterator, ParallelIterator};
@@ -20,6 +21,7 @@ pub struct MatchConfig {
     pub csv: bool,
     pub show_details: bool,
     pub filters: Vec<String>,
+    pub blacklist: Vec<String>,
     pub use_node_matching: bool,
     pub api_weight: f64,
     pub hier_weight: f64,
@@ -28,6 +30,7 @@ pub struct MatchConfig {
     pub summary: bool,
     pub score_only: bool,
     pub exclude_features: Vec<Feature>,
+    pub debug: bool,
 }
 
 /// Run package matching between two APKs and output the results as either a
@@ -41,8 +44,9 @@ pub fn handle_match(old_apk: PathBuf, new_apk: PathBuf, cfg: MatchConfig) -> Res
     match (&apks[0], &apks[1]) {
         (Ok(old), Ok(new)) => {
             let regex: Vec<Regex> = build_regex(&cfg.filters);
-            let old_classes = unpack_apk_classes(old, &regex);
-            let new_classes = unpack_apk_classes(new, &regex);
+            let blacklist_regex: Vec<Regex> = build_regex(&cfg.blacklist);
+            let old_classes = unpack_apk_classes(old, &regex, &blacklist_regex);
+            let new_classes = unpack_apk_classes(new, &regex, &blacklist_regex);
 
             let match_params = MatchParams {
                 match_threshold: cfg.threshold,
@@ -59,6 +63,18 @@ pub fn handle_match(old_apk: PathBuf, new_apk: PathBuf, cfg: MatchConfig) -> Res
             if cfg.score_only {
                 let summary = compute_match_summary(&match_result);
                 println!("{:.4}", summary.app_change_distance);
+                return Ok(());
+            }
+
+            if cfg.debug {
+                let pkg_debug = compute_package_debug_info(
+                    &old_classes,
+                    &new_classes,
+                    &match_params,
+                    &match_result,
+                );
+                let class_debug = debug_class_matches(&old_classes, &new_classes, &match_result);
+                print_debug_report(&pkg_debug, &class_debug);
                 return Ok(());
             }
 
@@ -178,6 +194,13 @@ pub fn handle_match(old_apk: PathBuf, new_apk: PathBuf, cfg: MatchConfig) -> Res
                             "NEW" => {
                                 println!("  {}  (added)", pkg_display(new_name));
                             }
+                            "EMPTY" => {
+                                println!(
+                                    "  {}  <->  {}  (empty)",
+                                    pkg_display(old_name),
+                                    pkg_display(new_name)
+                                );
+                            }
                             _ => {
                                 let old_m: usize =
                                     old_pkg_methods.get(old_name).copied().unwrap_or(0);
@@ -216,6 +239,7 @@ pub fn handle_match(old_apk: PathBuf, new_apk: PathBuf, cfg: MatchConfig) -> Res
                     println!("packages_changed,{}", summary.changed_packages);
                     println!("packages_removed,{}", summary.removed_packages);
                     println!("packages_added,{}", summary.added_packages);
+                    println!("packages_empty,{}", summary.empty_packages);
                     println!(
                         "packages_matched_pct,{:.2}%",
                         summary.packages_matched_ratio * 100.0
@@ -233,6 +257,10 @@ pub fn handle_match(old_apk: PathBuf, new_apk: PathBuf, cfg: MatchConfig) -> Res
                         summary.packages_added_ratio * 100.0
                     );
                     println!(
+                        "packages_empty_pct,{:.2}%",
+                        summary.packages_empty_ratio * 100.0
+                    );
+                    println!(
                         "code_in_matched_pct,{:.2}%",
                         summary.code_in_matched_ratio * 100.0
                     );
@@ -247,6 +275,10 @@ pub fn handle_match(old_apk: PathBuf, new_apk: PathBuf, cfg: MatchConfig) -> Res
                     println!(
                         "code_in_added_pct,{:.2}%",
                         summary.code_in_added_ratio * 100.0
+                    );
+                    println!(
+                        "code_in_empty_pct,{:.2}%",
+                        summary.code_in_empty_ratio * 100.0
                     );
                 } else {
                     println!("============================================================");
@@ -307,6 +339,12 @@ pub fn handle_match(old_apk: PathBuf, new_apk: PathBuf, cfg: MatchConfig) -> Res
                         summary.packages_added_ratio * 100.0,
                         summary.code_in_added_ratio * 100.0
                     );
+                    println!(
+                        "  Empty:   {:>6} ({:>6.2}% of pkgs | {:>6.2}% of code)",
+                        summary.empty_packages,
+                        summary.packages_empty_ratio * 100.0,
+                        summary.code_in_empty_ratio * 100.0
+                    );
                     println!("============================================================");
                 }
             }
@@ -321,4 +359,142 @@ pub fn handle_match(old_apk: PathBuf, new_apk: PathBuf, cfg: MatchConfig) -> Res
             Err(format!("Error parsing new apk: {new}"))
         }
     }
+}
+
+/// Print an in-depth debugging report of package-level and class-level matching.
+pub fn print_debug_report(pkg_debug: &[PackageMatchDebug], class_debug: &[ClassMatchDebug]) {
+    println!("================================================================================");
+    println!("                            MATCHING DEBUG REPORT                               ");
+    println!("================================================================================");
+    println!();
+    println!("--------------------------------------------------------------------------------");
+    println!("PACKAGE MATCHING BREAKDOWN ({} packages)", pkg_debug.len());
+    println!("--------------------------------------------------------------------------------");
+
+    for p in pkg_debug {
+        println!(
+            "Package: {} -> {}",
+            pkg_display(&p.old_package),
+            pkg_display(&p.new_package)
+        );
+        println!("  Status: {} | Final Score: {:.4}", p.status, p.total_score);
+        println!("  Reason: {}", p.match_reason);
+        if p.status != "EMPTY" && p.old_package != "---" && p.new_package != "---" {
+            println!("  Score Components:");
+            println!("    - Weisfeiler-Lehman (WL): {:.4}", p.matched_wl_score);
+            println!("    - API Calls (Jaccard):   {:.4}", p.matched_api_score);
+            println!("    - String Constants:      {:.4}", p.matched_string_score);
+            println!("    - Hierarchy Factor:      {:.4}", p.matched_hier_factor);
+        }
+        if !p.top_alternatives.is_empty() {
+            println!("  Top Alternative Packages (Runner-ups):");
+            for (idx, alt) in p.top_alternatives.iter().enumerate() {
+                println!(
+                    "    {}. {} (Total: {:.4} | WL: {:.4}, API: {:.4}, STR: {:.4}, HIER: {:.4})",
+                    idx + 1,
+                    pkg_display(&alt.package_name),
+                    alt.total_score,
+                    alt.wl_score,
+                    alt.api_score,
+                    alt.string_score,
+                    alt.hier_factor,
+                );
+            }
+        }
+        println!();
+    }
+
+    println!("--------------------------------------------------------------------------------");
+    println!("CLASS MATCHING BREAKDOWN ({} classes)", class_debug.len());
+    println!("--------------------------------------------------------------------------------");
+
+    for c in class_debug {
+        let old_name = c.old_class.as_deref().unwrap_or("---");
+        let new_name = c.new_class.as_deref().unwrap_or("---");
+        println!("Class: {} -> {}", old_name, new_name);
+        println!("  Status: {} | Match Score: {:.4}", c.status, c.score);
+        println!("  Reason: {}", c.match_reason);
+
+        if let Some(prof) = &c.old_profile {
+            println!("  Old Class Profile (19 Dimensions):");
+            println!(
+                "    - Superclass:         {}",
+                prof.super_class.as_deref().unwrap_or("(none)")
+            );
+            println!("    - Methods:            {}", prof.method_count);
+            println!("    - Instructions:       {}", prof.num_instructions);
+            println!("    - Registers:          {}", prof.register_count);
+            println!("    - Branches (ops):     {}", prof.has_branches);
+            println!("    - Try/Catch blocks:   {}", prof.try_catch_count);
+            println!("    - Field Accesses:     {}", prof.field_access_count);
+            println!("    - Method Parameters:  {}", prof.num_params);
+            println!("    - Constructors:       {}", prof.is_constructor_count);
+            println!(
+                "    - Invokes:            virtual: {}, static: {}, direct: {}, interface: {}",
+                prof.invoke_virtual_count,
+                prof.invoke_static_count,
+                prof.invoke_direct_count,
+                prof.invoke_interface_count
+            );
+            println!(
+                "    - External Calls:     android: {}, java: {}, kotlin: {}, other: {}",
+                prof.ext_android_count,
+                prof.ext_java_count,
+                prof.ext_kotlin_count,
+                prof.ext_other_count
+            );
+            println!("    - Distinct API Calls: {}", prof.distinct_api_calls);
+            println!("    - Distinct Strings:   {}", prof.distinct_strings);
+        }
+
+        if let Some(prof) = &c.new_profile {
+            println!("  New Class Profile (19 Dimensions):");
+            println!(
+                "    - Superclass:         {}",
+                prof.super_class.as_deref().unwrap_or("(none)")
+            );
+            println!("    - Methods:            {}", prof.method_count);
+            println!("    - Instructions:       {}", prof.num_instructions);
+            println!("    - Registers:          {}", prof.register_count);
+            println!("    - Branches (ops):     {}", prof.has_branches);
+            println!("    - Try/Catch blocks:   {}", prof.try_catch_count);
+            println!("    - Field Accesses:     {}", prof.field_access_count);
+            println!("    - Method Parameters:  {}", prof.num_params);
+            println!("    - Constructors:       {}", prof.is_constructor_count);
+            println!(
+                "    - Invokes:            virtual: {}, static: {}, direct: {}, interface: {}",
+                prof.invoke_virtual_count,
+                prof.invoke_static_count,
+                prof.invoke_direct_count,
+                prof.invoke_interface_count
+            );
+            println!(
+                "    - External Calls:     android: {}, java: {}, kotlin: {}, other: {}",
+                prof.ext_android_count,
+                prof.ext_java_count,
+                prof.ext_kotlin_count,
+                prof.ext_other_count
+            );
+            println!("    - Distinct API Calls: {}", prof.distinct_api_calls);
+            println!("    - Distinct Strings:   {}", prof.distinct_strings);
+        }
+
+        if !c.top_alternatives.is_empty() {
+            println!("  Top Alternative Classes (Runner-ups):");
+            for (idx, alt) in c.top_alternatives.iter().enumerate() {
+                println!(
+                    "    {}. {} (Total: {:.4} | API: {:.4}, String: {:.4}, Superclass: {:.4}, Method Count: {:.4})",
+                    idx + 1,
+                    alt.class_name,
+                    alt.total_score,
+                    alt.api_similarity,
+                    alt.string_similarity,
+                    alt.super_class_similarity,
+                    alt.method_count_similarity,
+                );
+            }
+        }
+        println!();
+    }
+    println!("================================================================================");
 }

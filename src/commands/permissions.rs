@@ -1,7 +1,9 @@
 //! Handler for the `permissions` subcommand — lists or diffs Android
 //! manifest permissions between APKs.
 
-use crate::utils::{compare_manifest_permissions, extract_manifest};
+use crate::utils::{
+    compare_manifest_permissions, extract_manifest, extract_manifest_permission_names,
+};
 use rayon::iter::{IntoParallelRefIterator, ParallelIterator};
 use smali::android::zip::ApkFile;
 use std::path::PathBuf;
@@ -25,8 +27,8 @@ pub fn handle_permissions(
             (Ok(old), Ok(new)) => {
                 if match_obfuscated {
                     let match_params = crate::matching::MatchParams::default();
-                    let old_classes = crate::compare::unpack_apk_classes(old, &[]);
-                    let new_classes = crate::compare::unpack_apk_classes(new, &[]);
+                    let old_classes = crate::compare::unpack_apk_classes(old, &[], &[]);
+                    let new_classes = crate::compare::unpack_apk_classes(new, &[], &[]);
                     let _match_set = crate::matching::build_class_match_set(
                         &old_classes,
                         &new_classes,
@@ -59,10 +61,8 @@ pub fn handle_permissions(
                     error!("Unable to extract manifest due to reason: {e}");
                     format!("Unable to extract manifest due to reason: {e}")
                 })?;
-                for x in manifest.uses_permissions() {
-                    for y in x.attributes.iter().filter_map(|t| t.raw_value.clone()) {
-                        println!("{y}");
-                    }
+                for y in extract_manifest_permission_names(&manifest) {
+                    println!("{y}");
                 }
                 Ok(())
             }

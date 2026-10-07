@@ -17,6 +17,7 @@ fn bench_run_match(c: &mut Criterion) {
         csv: false,
         show_details: false,
         filters: vec![],
+        blacklist: vec![],
         use_node_matching: true,
         api_weight: 0.2,
         hier_weight: 0.7,
@@ -25,6 +26,7 @@ fn bench_run_match(c: &mut Criterion) {
         summary: false,
         score_only: false,
         exclude_features: vec![Feature::Hier],
+        debug: false,
     };
 
     let mut group = c.benchmark_group("run_match");
@@ -52,6 +54,7 @@ fn bench_callgraph(c: &mut Criterion) {
             handle_callgraph(
                 black_box(apk_path.clone()),
                 black_box(filters.clone()),
+                black_box(vec![]),
                 false,
             )
         });
@@ -72,6 +75,7 @@ fn bench_compare(c: &mut Criterion) {
                 black_box(old_apk.clone()),
                 black_box(new_apk.clone()),
                 black_box(filters.clone()),
+                black_box(vec![]),
                 false,
             )
         });
@@ -90,6 +94,7 @@ fn bench_stats(c: &mut Criterion) {
             handle_stats(
                 black_box(apk_path.clone()),
                 black_box(filters.clone()),
+                black_box(vec![]),
                 false,
                 StatsFormat::Printed,
                 false,

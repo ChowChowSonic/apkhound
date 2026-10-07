@@ -500,7 +500,8 @@ pub fn compute_stats(
     apk: &ApkFile,
     classes: &[SmaliClass],
     apk_path: Option<&Path>,
-    filters: &[Regex],
+    whitelist: &[Regex],
+    blacklist: &[Regex],
     include_graph: bool,
 ) -> ApkStats {
     let dex_entries = apk
@@ -518,7 +519,9 @@ pub fn compute_stats(
     };
 
     let call_graph = if include_graph {
-        Some(call_graph_stats(&iterate_over_dex_files(apk, filters)))
+        Some(call_graph_stats(&iterate_over_dex_files(
+            apk, whitelist, blacklist,
+        )))
     } else {
         None
     };
@@ -786,13 +789,7 @@ fn change_coverage_from_classes_with_match_set(
     if let Some(ms) = match_set {
         for new_c in new_classes {
             let new_name = new_c.name.as_java_type();
-            let old_name_opt = ms.new_to_old.get(&new_name).or_else(|| {
-                if old_by_name.contains_key(&new_name) {
-                    Some(&new_name)
-                } else {
-                    None
-                }
-            });
+            let old_name_opt = ms.new_to_old.get(&new_name);
 
             if let Some(old_name) = old_name_opt
                 && let Some(old_c) = old_by_name.get(old_name.as_str())
@@ -873,8 +870,7 @@ fn change_coverage_from_classes_with_match_set(
             let is_paired = ms
                 .old_to_new
                 .get(&old_name)
-                .is_some_and(|nn| new_by_name.contains_key(nn))
-                || new_by_name.contains_key(&old_name);
+                .is_some_and(|nn| new_by_name.contains_key(nn));
             if !is_paired {
                 classes_removed += 1;
                 for old_m in &old_c.methods {
@@ -1856,5 +1852,39 @@ mod tests {
         assert_eq!(cov_match.classes.union_total, 6);
         assert_eq!(cov_match.classes.changed, 4);
         assert!((cov_match.classes.percent_changed - (4.0 / 6.0 * 100.0)).abs() < 1e-9);
+    }
+
+    #[test]
+    fn test_change_coverage_with_match_set_renamed_onto_removed_class() {
+        let m_removed = make_method("removedMethod", "()V", vec![]);
+        let old_removed = make_class("com.example.Target", vec![m_removed]);
+
+        let m_old_foo = make_method("m", "()V", vec![]);
+        let old_foo = make_class("com.example.OldFoo", vec![m_old_foo]);
+
+        let m_new = make_method("m", "()V", vec![]);
+        let new_target = make_class("com.example.Target", vec![m_new]);
+
+        let mut ms = ClassMatchSet::default();
+        ms.insert(
+            "com.example.OldFoo".to_string(),
+            "com.example.Target".to_string(),
+            0.9,
+        );
+
+        let stats = change_coverage_from_classes_with_match_set(
+            &[old_removed, old_foo],
+            &[new_target],
+            Some(&ms),
+        );
+
+        assert_eq!(
+            stats.classes.removed, 1,
+            "old Target class should be counted as removed"
+        );
+        assert_eq!(
+            stats.methods.removed, 1,
+            "removedMethod should be counted as removed"
+        );
     }
 }

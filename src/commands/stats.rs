@@ -49,7 +49,7 @@ struct StatsReport {
 }
 
 /// Compute statistics for one or two APKs and render them in the requested
-/// `format`.  A failed APK is a hard error; a class `filters` list restricts
+/// `format`.  A failed APK is a hard error; class `filters` and `blacklist` regexes restrict
 /// which classes/methods/opcodes are counted.
 ///
 /// Class unpacking happens exactly once per APK, up front and in parallel.
@@ -58,11 +58,13 @@ struct StatsReport {
 pub fn handle_stats(
     apks: Vec<PathBuf>,
     filters: Vec<String>,
+    blacklist: Vec<String>,
     graph: bool,
     format: StatsFormat,
     match_obfuscated: bool,
 ) -> Result<(), String> {
     let regex: Vec<Regex> = build_regex(&filters);
+    let blacklist_regex: Vec<Regex> = build_regex(&blacklist);
 
     let apk_results: Vec<(PathBuf, Result<ApkFile, _>)> = apks
         .par_iter()
@@ -83,8 +85,15 @@ pub fn handle_stats(
         .par_iter()
         .map(|(path, res)| {
             let apk = res.as_ref().expect("APK parse errors handled above");
-            let classes = unpack_apk_classes(apk, &regex);
-            let stats = compute_stats(apk, &classes, Some(path.as_path()), &regex, graph);
+            let classes = unpack_apk_classes(apk, &regex, &blacklist_regex);
+            let stats = compute_stats(
+                apk,
+                &classes,
+                Some(path.as_path()),
+                &regex,
+                &blacklist_regex,
+                graph,
+            );
             ApkAnalysis { classes, stats }
         })
         .collect();

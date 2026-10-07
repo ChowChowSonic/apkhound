@@ -13,13 +13,14 @@ use std::path::PathBuf;
 use tracing::error;
 
 /// Compare the classes in `old_apk` and `new_apk` and print any additions,
-/// removals, or changes found. An optional list of regex `filters` can
+/// removals, or changes found. Optional `filters` and `blacklist` regexes can
 /// restrict which classes are examined. When `match_obfuscated` is true,
 /// runs matching analysis first to pair classes across obfuscated names.
 pub fn handle_compare(
     old_apk: PathBuf,
     new_apk: PathBuf,
     filters: Vec<String>,
+    blacklist: Vec<String>,
     match_obfuscated: bool,
 ) -> Result<(), String> {
     let apks: Vec<Result<ApkFile, _>> = vec![old_apk, new_apk]
@@ -29,8 +30,9 @@ pub fn handle_compare(
     match (&apks[0], &apks[1]) {
         (Ok(old), Ok(new)) => {
             let regex: Vec<Regex> = build_regex(&filters);
-            let old_classes_vec = unpack_apk_classes(old, &regex);
-            let new_classes_vec = unpack_apk_classes(new, &regex);
+            let blacklist_regex: Vec<Regex> = build_regex(&blacklist);
+            let old_classes_vec = unpack_apk_classes(old, &regex, &blacklist_regex);
+            let new_classes_vec = unpack_apk_classes(new, &regex, &blacklist_regex);
 
             let match_set = if match_obfuscated {
                 let params = MatchParams::default();

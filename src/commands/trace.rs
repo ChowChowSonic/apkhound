@@ -231,8 +231,8 @@ pub fn handle_trace(
 
     let (start_regs, end_regs) = if match_obfuscated && files.len() >= 2 {
         let match_params = crate::matching::MatchParams::default();
-        let old_classes = crate::compare::unpack_apk_classes(&files[0], &[]);
-        let new_classes = crate::compare::unpack_apk_classes(&files[1], &[]);
+        let old_classes = crate::compare::unpack_apk_classes(&files[0], &[], &[]);
+        let new_classes = crate::compare::unpack_apk_classes(&files[1], &[], &[]);
         let match_set =
             crate::matching::build_class_match_set(&old_classes, &new_classes, &match_params);
 
@@ -274,7 +274,7 @@ pub fn handle_trace(
 
     let start_maps: Vec<FxHashMap<String, Vec<String>>> = files
         .par_iter()
-        .map(|x| iterate_over_dex_files(x, &[]))
+        .map(|x| iterate_over_dex_files(x, &[], &[]))
         .collect();
     let results: Vec<Vec<String>> = start_maps
         .par_iter()

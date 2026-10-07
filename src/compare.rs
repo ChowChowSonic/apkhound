@@ -2,6 +2,7 @@
 //! method-signature level, and optionally dump changed smali to disk.
 
 use crate::matching::ClassMatchSet;
+use crate::utils::is_match_allowed;
 use rayon::prelude::*;
 use regex::Regex;
 use rustc_hash::FxHashMap;
@@ -63,14 +64,15 @@ fn method_filename(m: &SmaliMethod) -> String {
 }
 
 /// For each changed / added / removed method, write the old and new smali to
-/// `output_dir/{old,new}/...`. An optional list of `filters` restricts
+/// `output_dir/{old,new}/...`. Optional `smali_whitelist` and `smali_blacklist` restrict
 /// which smali lines are written. When `match_set` is provided, paired classes
 /// are compared across obfuscated boundaries.
 pub fn dump_changes_between_classes(
     new_classes: FxHashMap<String, SmaliClass>,
     old_classes: FxHashMap<String, SmaliClass>,
     output_dir_buf: &Path,
-    filters: &[Regex],
+    smali_whitelist: &[Regex],
+    smali_blacklist: &[Regex],
     match_set: Option<&ClassMatchSet>,
 ) -> Result<(), std::io::Error> {
     let new_root = output_dir_buf.join("new");
@@ -80,11 +82,11 @@ pub fn dump_changes_between_classes(
 
     let filtered_smali = |method: &SmaliMethod| -> String {
         let text = format!("{}", method);
-        if filters.is_empty() {
+        if smali_whitelist.is_empty() && smali_blacklist.is_empty() {
             return text;
         }
         text.lines()
-            .filter(|line| filters.iter().any(|r| r.is_match(line)))
+            .filter(|line| is_match_allowed(line, smali_whitelist, smali_blacklist))
             .collect::<Vec<_>>()
             .join("\n")
     };
@@ -92,13 +94,7 @@ pub fn dump_changes_between_classes(
     if let Some(ms) = match_set {
         for (new_key, class) in &new_classes {
             let new_class_dir = new_key.replace(".", std::path::MAIN_SEPARATOR_STR);
-            let old_key_opt = ms.new_to_old.get(new_key).or_else(|| {
-                if old_classes.contains_key(new_key) {
-                    Some(new_key)
-                } else {
-                    None
-                }
-            });
+            let old_key_opt = ms.new_to_old.get(new_key);
 
             if let Some(old_key) = old_key_opt
                 && let Some(old_class) = old_classes.get(old_key)
@@ -167,8 +163,7 @@ pub fn dump_changes_between_classes(
             let is_paired = ms
                 .old_to_new
                 .get(old_key)
-                .is_some_and(|nk| new_classes.contains_key(nk))
-                || new_classes.contains_key(old_key);
+                .is_some_and(|nk| new_classes.contains_key(nk));
             if !is_paired {
                 let class_dir = old_key.replace(".", std::path::MAIN_SEPARATOR_STR);
                 let old_dir = old_root.join(&class_dir);
@@ -273,13 +268,7 @@ pub fn find_changes_between_classes(
 
     if let Some(ms) = match_set {
         for (new_key, class) in &new_classes {
-            let old_key_opt = ms.new_to_old.get(new_key).or_else(|| {
-                if old_classes.contains_key(new_key) {
-                    Some(new_key)
-                } else {
-                    None
-                }
-            });
+            let old_key_opt = ms.new_to_old.get(new_key);
 
             if let Some(old_key) = old_key_opt
                 && let Some(old_class) = old_classes.get(old_key)
@@ -329,8 +318,7 @@ pub fn find_changes_between_classes(
             let is_paired = ms
                 .old_to_new
                 .get(old_key)
-                .is_some_and(|nk| new_classes.contains_key(nk))
-                || new_classes.contains_key(old_key);
+                .is_some_and(|nk| new_classes.contains_key(nk));
             if !is_paired {
                 for old_method in &old_class.methods {
                     res.push(EditType::Remove(construct_java_signature(
@@ -445,24 +433,28 @@ pub fn method_headers_match(old: &SmaliMethod, new: &SmaliMethod) -> bool {
     true
 }
 
-fn unpack_dex_file(dex: DexFile, filters: &[Regex], accum: &mut Vec<SmaliClass>) {
+fn unpack_dex_file(
+    dex: DexFile,
+    whitelist: &[Regex],
+    blacklist: &[Regex],
+    accum: &mut Vec<SmaliClass>,
+) {
     if let Ok(classes) = dex.to_smali() {
         let tmpres: Vec<SmaliClass> = classes
             .into_par_iter()
-            .filter(|val| {
-                filters.is_empty()
-                    || filters
-                        .iter()
-                        .any(|reg| reg.is_match(&val.name.as_java_type()))
-            })
+            .filter(|val| is_match_allowed(&val.name.as_java_type(), whitelist, blacklist))
             .collect();
         accum.extend(tmpres);
     }
 }
 
 /// Read every DEX entry in an APK and return all `SmaliClass` values that
-/// match the optional regex filters.
-pub fn unpack_apk_classes(apk: &ApkFile, filters: &[Regex]) -> Vec<SmaliClass> {
+/// match the optional whitelist regexes and do not match the blacklist regexes.
+pub fn unpack_apk_classes(
+    apk: &ApkFile,
+    whitelist: &[Regex],
+    blacklist: &[Regex],
+) -> Vec<SmaliClass> {
     let entry_names: Vec<_> = apk
         .entry_names()
         .filter(|x| is_top_level_dex_name(x))
@@ -473,7 +465,7 @@ pub fn unpack_apk_classes(apk: &ApkFile, filters: &[Regex]) -> Vec<SmaliClass> {
             if let Some(entry) = entry_res {
                 let dex_result = DexFile::from_bytes(&entry.data);
                 if let Ok(dex) = dex_result {
-                    unpack_dex_file(dex, filters, &mut accum);
+                    unpack_dex_file(dex, whitelist, blacklist, &mut accum);
                 } else if let Err(e) = dex_result {
                     error!("Failed to create dex file from binary code provided by entry {x:?} due to reason: {e}");
                 }
@@ -490,7 +482,7 @@ pub fn unpack_apk_classes(apk: &ApkFile, filters: &[Regex]) -> Vec<SmaliClass> {
 mod tests {
     use super::*;
     use smali::smali_ops::{DexOp, Label, MethodRef};
-    use smali::types::{MethodSignature, Modifier};
+    use smali::types::{MethodSignature, Modifier, ObjectIdentifier};
 
     fn make_method(name: &str, sig: &str, ops: Vec<SmaliOp>) -> SmaliMethod {
         SmaliMethod {
@@ -503,6 +495,20 @@ mod tests {
             params: vec![],
             annotations: vec![],
             ops,
+        }
+    }
+
+    fn make_class(name: &str, methods: Vec<SmaliMethod>) -> SmaliClass {
+        SmaliClass {
+            name: ObjectIdentifier::from_java_type(name),
+            modifiers: vec![],
+            source: None,
+            super_class: ObjectIdentifier::from_java_type("java.lang.Object"),
+            implements: vec![],
+            annotations: vec![],
+            fields: vec![],
+            methods,
+            file_path: None,
         }
     }
 
@@ -789,5 +795,94 @@ mod tests {
         let mut b = make_method("foo", "()V", vec![]);
         b.registers = Some(8);
         assert!(!method_headers_match(&a, &b));
+    }
+
+    #[test]
+    fn test_find_changes_with_match_set_renamed_onto_removed_class_name() {
+        let old_removed = make_class(
+            "com.example.Target",
+            vec![make_method("removedMethod", "()V", vec![])],
+        );
+        let old_foo = make_class(
+            "com.example.OldFoo",
+            vec![make_method(
+                "m",
+                "()V",
+                vec![SmaliOp::Op(DexOp::ReturnVoid)],
+            )],
+        );
+        let mut old_map = FxHashMap::default();
+        old_map.insert("com.example.Target".to_string(), old_removed);
+        old_map.insert("com.example.OldFoo".to_string(), old_foo);
+
+        // New APK has "com.example.Target" which is the renamed "com.example.OldFoo"
+        let new_target = make_class(
+            "com.example.Target",
+            vec![make_method(
+                "m",
+                "()V",
+                vec![SmaliOp::Op(DexOp::ReturnVoid)],
+            )],
+        );
+        let mut new_map = FxHashMap::default();
+        new_map.insert("com.example.Target".to_string(), new_target);
+
+        let mut match_set = ClassMatchSet::default();
+        match_set.insert(
+            "com.example.OldFoo".to_string(),
+            "com.example.Target".to_string(),
+            0.9,
+        );
+
+        let edits = find_changes_between_classes(new_map, old_map, Some(&match_set));
+        let removed: Vec<_> = edits
+            .iter()
+            .filter_map(|e| match e {
+                EditType::Remove(s) => Some(s.clone()),
+                _ => None,
+            })
+            .collect();
+
+        assert!(
+            !removed.is_empty(),
+            "old com.example.Target was removed and its method must be reported as removed"
+        );
+        assert!(
+            removed.iter().any(|s| s.contains("removedMethod")),
+            "removedMethod must be reported as removed"
+        );
+    }
+
+    #[test]
+    fn test_dump_changes_smali_filtering_whitelist_and_blacklist() {
+        let old_method = make_method("testMethod", "()V", vec![SmaliOp::Op(DexOp::ReturnVoid)]);
+        let new_method = make_method("testMethod", "()V", vec![SmaliOp::Op(DexOp::Nop)]);
+        let old_class = make_class("com.example.Test", vec![old_method]);
+        let new_class = make_class("com.example.Test", vec![new_method]);
+        let mut old_classes = FxHashMap::default();
+        old_classes.insert("com.example.Test".to_string(), old_class);
+        let mut new_classes = FxHashMap::default();
+        new_classes.insert("com.example.Test".to_string(), new_class);
+
+        let temp_dir = std::env::temp_dir().join(format!(
+            "apkhound_test_extract_{}",
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let smali_white = vec![Regex::new("method|nop").unwrap()];
+        let smali_black = vec![Regex::new("return").unwrap()];
+
+        let res = dump_changes_between_classes(
+            new_classes,
+            old_classes,
+            &temp_dir,
+            &smali_white,
+            &smali_black,
+            None,
+        );
+        assert!(res.is_ok());
+        let _ = std::fs::remove_dir_all(&temp_dir);
     }
 }

@@ -16,7 +16,7 @@ use smali::types::{SmaliClass, SmaliMethod, SmaliOp, TypeSignature};
 pub type Histogram = FxHashMap<u64, usize>;
 
 /// A single matching result entry: (old_package, new_package, similarity_score, status).
-/// Status is one of `MATCH`, `CHANGED`, `REMOVED`, or `NEW`.
+/// Status is one of `MATCH`, `CHANGED`, `REMOVED`, `NEW`, or `EMPTY`.
 pub type MatchEntry = (String, String, f64, String);
 
 /// Parameters that control the matching algorithm.
@@ -212,7 +212,7 @@ pub struct PackageGraph {
 /// The output of a matching run.
 pub struct MatchResult {
     /// Each entry: `(old_package, new_package, similarity_score, status)`.
-    /// Status is one of `MATCH`, `CHANGED`, `REMOVED`, or `NEW`.
+    /// Status is one of `MATCH`, `CHANGED`, `REMOVED`, `NEW`, or `EMPTY`.
     pub results: Vec<MatchEntry>,
     /// Number of methods per package in the old APK.
     pub old_pkg_methods: FxHashMap<String, usize>,
@@ -230,7 +230,7 @@ pub struct AppChangeMetrics {
     pub app_similarity_score: f64,
     /// Unweighted arithmetic mean of similarity scores across all union packages.
     pub unweighted_similarity: f64,
-    /// Total distinct packages in the union of both APKs (matched + changed + removed + new).
+    /// Total distinct packages in the union of both APKs (matched + changed + removed + new + empty).
     pub packages_total_union: usize,
     /// Number of packages with status MATCH.
     pub matched_packages: usize,
@@ -240,6 +240,8 @@ pub struct AppChangeMetrics {
     pub removed_packages: usize,
     /// Number of packages with status NEW.
     pub added_packages: usize,
+    /// Number of packages with status EMPTY.
+    pub empty_packages: usize,
     /// Fraction of union packages that are MATCH.
     pub packages_matched_ratio: f64,
     /// Fraction of union packages that are CHANGED.
@@ -248,6 +250,8 @@ pub struct AppChangeMetrics {
     pub packages_removed_ratio: f64,
     /// Fraction of union packages that are NEW.
     pub packages_added_ratio: f64,
+    /// Fraction of union packages that are EMPTY.
+    pub packages_empty_ratio: f64,
     /// Total weighted method count across all packages: sum(max(old_m, new_m)).
     pub total_weighted_methods: usize,
     /// Fraction of total weighted methods residing in MATCH packages.
@@ -258,6 +262,83 @@ pub struct AppChangeMetrics {
     pub code_in_removed_ratio: f64,
     /// Fraction of total weighted methods residing in NEW packages.
     pub code_in_added_ratio: f64,
+    /// Fraction of total weighted methods residing in EMPTY packages (always 0.0).
+    pub code_in_empty_ratio: f64,
+}
+
+/// Debug information for a single candidate package match.
+#[derive(Clone, Debug, PartialEq, Serialize)]
+pub struct PackageCandidateDebug {
+    pub package_name: String,
+    pub total_score: f64,
+    pub wl_score: f64,
+    pub api_score: f64,
+    pub string_score: f64,
+    pub hier_factor: f64,
+}
+
+/// Debug report for a package match.
+#[derive(Clone, Debug, PartialEq, Serialize)]
+pub struct PackageMatchDebug {
+    pub old_package: String,
+    pub new_package: String,
+    pub status: String,
+    pub total_score: f64,
+    pub matched_wl_score: f64,
+    pub matched_api_score: f64,
+    pub matched_string_score: f64,
+    pub matched_hier_factor: f64,
+    pub match_reason: String,
+    pub top_alternatives: Vec<PackageCandidateDebug>,
+}
+
+/// Class-level aggregated profile across all 19 WL feature dimensions and metadata.
+#[derive(Clone, Debug, PartialEq, Serialize)]
+pub struct ClassProfile {
+    pub class_name: String,
+    pub super_class: Option<String>,
+    pub method_count: usize,
+    pub num_instructions: usize,
+    pub register_count: usize,
+    pub has_branches: usize,
+    pub try_catch_count: usize,
+    pub field_access_count: usize,
+    pub num_params: usize,
+    pub is_constructor_count: usize,
+    pub invoke_virtual_count: usize,
+    pub invoke_static_count: usize,
+    pub invoke_direct_count: usize,
+    pub invoke_interface_count: usize,
+    pub ext_android_count: usize,
+    pub ext_java_count: usize,
+    pub ext_kotlin_count: usize,
+    pub ext_other_count: usize,
+    pub distinct_api_calls: usize,
+    pub distinct_strings: usize,
+}
+
+/// Debug information for an alternative candidate class match.
+#[derive(Clone, Debug, PartialEq, Serialize)]
+pub struct ClassCandidateDebug {
+    pub class_name: String,
+    pub total_score: f64,
+    pub api_similarity: f64,
+    pub string_similarity: f64,
+    pub super_class_similarity: f64,
+    pub method_count_similarity: f64,
+}
+
+/// Full debug information for a class match.
+#[derive(Clone, Debug, PartialEq, Serialize)]
+pub struct ClassMatchDebug {
+    pub old_class: Option<String>,
+    pub new_class: Option<String>,
+    pub status: String,
+    pub score: f64,
+    pub match_reason: String,
+    pub old_profile: Option<ClassProfile>,
+    pub new_profile: Option<ClassProfile>,
+    pub top_alternatives: Vec<ClassCandidateDebug>,
 }
 
 /// Compute aggregate application change metrics from a [`MatchResult`].
@@ -266,6 +347,7 @@ pub struct AppChangeMetrics {
 /// - Each package entry is weighted by its method footprint: `weight = max(old_methods, new_methods)`.
 /// - For `REMOVED` packages, `score = 0.0` and `weight = old_methods`.
 /// - For `NEW` packages, `score = 0.0` and `weight = new_methods`.
+/// - For `EMPTY` packages, `score = 1.0` and `weight = 0`.
 /// - `app_similarity_score` is the method-weighted average of package similarity scores:
 ///   `sum(score_i * weight_i) / sum(weight_i)`.
 /// - `app_change_distance` is `1.0 - app_similarity_score`, bounded in `[0.0, 1.0]`.
@@ -274,11 +356,13 @@ pub fn compute_match_summary(result: &MatchResult) -> AppChangeMetrics {
     let mut changed_packages = 0usize;
     let mut removed_packages = 0usize;
     let mut added_packages = 0usize;
+    let mut empty_packages = 0usize;
 
     let mut matched_methods = 0usize;
     let mut changed_methods = 0usize;
     let mut removed_methods = 0usize;
     let mut added_methods = 0usize;
+    let mut empty_methods = 0usize;
 
     let mut weighted_score_sum = 0.0f64;
     let mut raw_score_sum = 0.0f64;
@@ -300,6 +384,11 @@ pub fn compute_match_summary(result: &MatchResult) -> AppChangeMetrics {
             "CHANGED" => {
                 changed_packages += 1;
                 changed_methods += weight;
+                weighted_score_sum += clamped_score * weight as f64;
+            }
+            "EMPTY" => {
+                empty_packages += 1;
+                empty_methods += weight;
                 weighted_score_sum += clamped_score * weight as f64;
             }
             "REMOVED" => {
@@ -324,7 +413,7 @@ pub fn compute_match_summary(result: &MatchResult) -> AppChangeMetrics {
     };
 
     let total_weighted_methods =
-        matched_methods + changed_methods + removed_methods + added_methods;
+        matched_methods + changed_methods + removed_methods + added_methods + empty_methods;
 
     let app_similarity_score = if total_weighted_methods > 0 {
         (weighted_score_sum / total_weighted_methods as f64).clamp(0.0, 1.0)
@@ -339,6 +428,7 @@ pub fn compute_match_summary(result: &MatchResult) -> AppChangeMetrics {
         packages_changed_ratio,
         packages_removed_ratio,
         packages_added_ratio,
+        packages_empty_ratio,
     ) = if packages_total_union > 0 {
         let n = packages_total_union as f64;
         (
@@ -346,23 +436,30 @@ pub fn compute_match_summary(result: &MatchResult) -> AppChangeMetrics {
             changed_packages as f64 / n,
             removed_packages as f64 / n,
             added_packages as f64 / n,
+            empty_packages as f64 / n,
         )
     } else {
-        (0.0, 0.0, 0.0, 0.0)
+        (0.0, 0.0, 0.0, 0.0, 0.0)
     };
 
-    let (code_in_matched_ratio, code_in_changed_ratio, code_in_removed_ratio, code_in_added_ratio) =
-        if total_weighted_methods > 0 {
-            let m = total_weighted_methods as f64;
-            (
-                matched_methods as f64 / m,
-                changed_methods as f64 / m,
-                removed_methods as f64 / m,
-                added_methods as f64 / m,
-            )
-        } else {
-            (0.0, 0.0, 0.0, 0.0)
-        };
+    let (
+        code_in_matched_ratio,
+        code_in_changed_ratio,
+        code_in_removed_ratio,
+        code_in_added_ratio,
+        code_in_empty_ratio,
+    ) = if total_weighted_methods > 0 {
+        let m = total_weighted_methods as f64;
+        (
+            matched_methods as f64 / m,
+            changed_methods as f64 / m,
+            removed_methods as f64 / m,
+            added_methods as f64 / m,
+            empty_methods as f64 / m,
+        )
+    } else {
+        (0.0, 0.0, 0.0, 0.0, 0.0)
+    };
 
     AppChangeMetrics {
         app_change_distance,
@@ -373,15 +470,18 @@ pub fn compute_match_summary(result: &MatchResult) -> AppChangeMetrics {
         changed_packages,
         removed_packages,
         added_packages,
+        empty_packages,
         packages_matched_ratio,
         packages_changed_ratio,
         packages_removed_ratio,
         packages_added_ratio,
+        packages_empty_ratio,
         total_weighted_methods,
         code_in_matched_ratio,
         code_in_changed_ratio,
         code_in_removed_ratio,
         code_in_added_ratio,
+        code_in_empty_ratio,
     }
 }
 
@@ -1144,7 +1244,7 @@ fn greedy_assign(
     let mut results = Vec::new();
     let mut used_new: FxHashSet<usize> = FxHashSet::default();
 
-    old_best.sort_by(|a, b| b.2.partial_cmp(&a.2).unwrap());
+    old_best.sort_by(|a, b| b.2.partial_cmp(&a.2).unwrap_or(std::cmp::Ordering::Equal));
 
     for &(i, best_j, best_s) in old_best.iter() {
         let can_assign = if best_j >= 0 && best_s >= change_threshold {
@@ -1191,8 +1291,8 @@ fn greedy_assign(
 
 /// Greedy bipartite matching between old and new packages based on WL
 /// histogram similarity.  Results are labelled `MATCH`, `CHANGED`,
-/// `REMOVED`, or `NEW` depending on `match_threshold` and
-/// `change_threshold`.
+/// `REMOVED`, `NEW`, or `EMPTY` depending on `match_threshold`,
+/// `change_threshold`, and whether packages are empty.
 ///
 /// When `use_node_matching` is true, the scores of matched/changed pairs are
 /// additionally penalised by the node-label consistency check *after* the
@@ -1203,8 +1303,8 @@ pub fn match_packages(
     old: &SideData,
     new: &SideData,
     params: &MatchParams,
-    old_parents: &FxHashMap<String, Vec<String>>,
-    new_parents: &FxHashMap<String, Vec<String>>,
+    _old_parents: &FxHashMap<String, Vec<String>>,
+    _new_parents: &FxHashMap<String, Vec<String>>,
 ) -> Vec<MatchEntry> {
     let (wl_weight, api_weight, string_weight, hier_weight) = effective_weights(params);
 
@@ -1300,28 +1400,16 @@ pub fn match_packages(
         )
     };
 
-    // Match no-graph packages using hierarchy context
+    // Match no-graph packages (empty packages): exact name matches between packages
+    // that are empty in both APKs are classified as EMPTY; unmatched empty packages
+    // are flagged as REMOVED or NEW.
     {
-        let mut match_map: FxHashMap<String, (String, f64)> = FxHashMap::default();
-        let mut used_new_names: FxHashSet<&str> = FxHashSet::default();
-        for (on, nn, score, status) in &results {
-            if status != "REMOVED" && status != "NEW" && *score > 0.0 {
-                match_map.insert(on.clone(), (nn.clone(), *score));
-                used_new_names.insert(nn.as_str());
-            }
-        }
-        let empty_results = match_empty_packages(
-            old,
-            new,
-            old_parents,
-            new_parents,
-            &match_map,
-            &used_new_names,
-        );
+        let empty_results = match_empty_packages(old, new);
         results.extend(empty_results);
     }
 
     if params.use_node_matching {
+        let mut split_news = Vec::new();
         for (old_name, new_name, score, status) in &mut results {
             if (*status == "MATCH" || *status == "CHANGED")
                 && let (Some(sig_a), Some(sig_b)) = (old.sigs.get(old_name), new.sigs.get(new_name))
@@ -1329,11 +1417,15 @@ pub fn match_packages(
                 *score *= node_label_consistency(sig_a, sig_b);
                 if *score < params.change_threshold {
                     *status = "REMOVED".to_string();
+                    *score = 0.0;
+                    let former_new = std::mem::replace(new_name, "---".to_string());
+                    split_news.push(("---".to_string(), former_new, 0.0, "NEW".to_string()));
                 } else if *score < params.match_threshold {
                     *status = "CHANGED".to_string();
                 }
             }
         }
+        results.extend(split_news);
     }
 
     results
@@ -1363,78 +1455,31 @@ fn build_parent_map(names: &[String]) -> FxHashMap<String, Vec<String>> {
     map
 }
 
-fn match_empty_packages(
-    old: &SideData,
-    new: &SideData,
-    _old_parent_map: &FxHashMap<String, Vec<String>>,
-    _new_parent_map: &FxHashMap<String, Vec<String>>,
-    match_map: &FxHashMap<String, (String, f64)>,
-    used_new_main: &FxHashSet<&str>,
-) -> Vec<MatchEntry> {
+fn match_empty_packages(old: &SideData, new: &SideData) -> Vec<MatchEntry> {
     let mut results = Vec::new();
-    let mut used_old = FxHashSet::default();
+    let new_empty_set: FxHashSet<&str> = new.no_graph.iter().map(|s| s.as_str()).collect();
     let mut used_new = FxHashSet::default();
 
-    // All new package names; avoid re-matching packages already claimed in the main pass
-    let new_all: FxHashSet<&str> = new
-        .names
-        .iter()
-        .chain(new.no_graph.iter())
-        .filter(|n| !used_new_main.contains(n.as_str()))
-        .map(|s| s.as_str())
-        .collect();
     for old_pkg in old.no_graph {
-        if match_map.contains_key(old_pkg) {
-            continue;
-        }
-        let old_parent = parent_path(old_pkg);
-
-        // Try to match old empty against new empties by same name or parent context
-        for new_pkg in new.no_graph {
-            if used_new.contains(new_pkg) {
-                continue;
-            }
-            let new_parent = parent_path(new_pkg);
-            if old_parent == new_parent {
-                if old_pkg == new_pkg {
-                    results.push((old_pkg.clone(), new_pkg.clone(), 1.0, "MATCH".to_string()));
-                    used_old.insert(old_pkg.clone());
-                    used_new.insert(new_pkg.clone());
-                    break;
-                } else if let (Some(op), Some(np)) = (&old_parent, &new_parent)
-                    && let Some((matched_new, _)) = match_map.get(op)
-                    && matched_new == np
-                {
-                    results.push((old_pkg.clone(), new_pkg.clone(), 1.0, "MATCH".to_string()));
-                    used_old.insert(old_pkg.clone());
-                    used_new.insert(new_pkg.clone());
-                    break;
-                }
-            }
-        }
-
-        // Fallback: match old empty against new packages WITH graphs by same name
-        if !used_old.contains(old_pkg) && new_all.contains(old_pkg.as_str()) {
-            results.push((old_pkg.clone(), old_pkg.clone(), 1.0, "MATCH".to_string()));
-            used_old.insert(old_pkg.clone());
-            used_new.insert(old_pkg.clone());
-        }
-
-        if !used_old.contains(old_pkg) {
+        if new_empty_set.contains(old_pkg.as_str()) {
+            results.push((old_pkg.clone(), old_pkg.clone(), 1.0, "EMPTY".to_string()));
+            used_new.insert(old_pkg.as_str());
+        } else {
             results.push((
                 old_pkg.clone(),
                 "---".to_string(),
                 0.0,
                 "REMOVED".to_string(),
             ));
-            used_old.insert(old_pkg.clone());
         }
     }
+
     for new_pkg in new.no_graph {
-        if !used_new.contains(new_pkg) {
+        if !used_new.contains(new_pkg.as_str()) {
             results.push(("---".to_string(), new_pkg.clone(), 0.0, "NEW".to_string()));
         }
     }
+
     results
 }
 
@@ -1538,7 +1583,14 @@ fn summarize_class(c: &SmaliClass, pkg_slash: &str) -> ClassSummary {
     }
 }
 
-fn compute_class_similarity(a: &ClassSummary, b: &ClassSummary) -> f64 {
+fn compute_class_similarity_components(
+    a: &ClassSummary,
+    b: &ClassSummary,
+) -> (f64, f64, f64, f64, f64) {
+    if a.method_count == 0 || b.method_count == 0 {
+        return (0.0, 0.0, 0.0, 0.0, 0.0);
+    }
+
     let s_api = if a.api_calls.is_empty() && b.api_calls.is_empty() {
         0.5
     } else {
@@ -1577,7 +1629,12 @@ fn compute_class_similarity(a: &ClassSummary, b: &ClassSummary) -> f64 {
         min_m as f64 / max_m as f64
     };
 
-    0.35 * s_api + 0.35 * s_string + 0.15 * s_super + 0.15 * s_count
+    let total = 0.35 * s_api + 0.35 * s_string + 0.15 * s_super + 0.15 * s_count;
+    (s_api, s_string, s_super, s_count, total)
+}
+
+fn compute_class_similarity(a: &ClassSummary, b: &ClassSummary) -> f64 {
+    compute_class_similarity_components(a, b).4
 }
 
 /// Use a package-level `MatchResult` to pair classes between two APKs.
@@ -1593,7 +1650,7 @@ pub fn build_class_match_set_from_result(
     // Map matched packages: old_pkg_dot -> (new_pkg_dot, old_pkg_slash, score)
     let mut pkg_matches: Vec<(String, String, String, String, f64)> = Vec::new();
     for (old_pkg_slash, new_pkg_slash, score, status) in &match_result.results {
-        if (status == "MATCH" || status == "CHANGED")
+        if (status == "MATCH" || status == "CHANGED" || status == "EMPTY")
             && *score > 0.0
             && old_pkg_slash != "---"
             && new_pkg_slash != "---"
@@ -1634,9 +1691,12 @@ pub fn build_class_match_set_from_result(
                 continue;
             }
             let old_simple = get_simple_name(&old_name);
+            let old_empty = old_c.methods.is_empty();
             if let Some(new_c) = new_pkg_classes.iter().find(|nc| {
                 let new_name = nc.name.as_java_type();
-                !matched_new_classes.contains(&new_name) && get_simple_name(&new_name) == old_simple
+                !matched_new_classes.contains(&new_name)
+                    && get_simple_name(&new_name) == old_simple
+                    && nc.methods.is_empty() == old_empty
             }) {
                 let new_name = new_c.name.as_java_type();
                 match_set.insert(old_name.clone(), new_name.clone(), pkg_score);
@@ -1656,11 +1716,15 @@ pub fn build_class_match_set_from_result(
             .collect();
 
         if remaining_old.len() == 1 && remaining_new.len() == 1 {
-            let old_name = remaining_old[0].name.as_java_type();
-            let new_name = remaining_new[0].name.as_java_type();
-            match_set.insert(old_name.clone(), new_name.clone(), pkg_score);
-            matched_old_classes.insert(old_name);
-            matched_new_classes.insert(new_name);
+            let old_c = remaining_old[0];
+            let new_c = remaining_new[0];
+            if old_c.methods.is_empty() == new_c.methods.is_empty() {
+                let old_name = old_c.name.as_java_type();
+                let new_name = new_c.name.as_java_type();
+                match_set.insert(old_name.clone(), new_name.clone(), pkg_score);
+                matched_old_classes.insert(old_name);
+                matched_new_classes.insert(new_name);
+            }
         } else if !remaining_old.is_empty() && !remaining_new.is_empty() {
             let old_summaries: Vec<_> = remaining_old
                 .iter()
@@ -1673,9 +1737,17 @@ pub fn build_class_match_set_from_result(
 
             let mut candidate_pairs: Vec<(usize, usize, f64)> = Vec::new();
             for (oi, o_sum) in old_summaries.iter().enumerate() {
+                if remaining_old[oi].methods.is_empty() {
+                    continue;
+                }
                 for (ni, n_sum) in new_summaries.iter().enumerate() {
+                    if remaining_new[ni].methods.is_empty() {
+                        continue;
+                    }
                     let score = compute_class_similarity(o_sum, n_sum);
-                    candidate_pairs.push((oi, ni, score));
+                    if score > 0.0 {
+                        candidate_pairs.push((oi, ni, score));
+                    }
                 }
             }
             candidate_pairs
@@ -1704,8 +1776,9 @@ pub fn build_class_match_set_from_result(
     for old_c in old_classes {
         let old_name = old_c.name.as_java_type();
         if !matched_old_classes.contains(&old_name)
-            && let Some(_new_c) = new_name_set.get(&old_name)
+            && let Some(new_c) = new_name_set.get(&old_name)
             && !matched_new_classes.contains(&old_name)
+            && old_c.methods.is_empty() == new_c.methods.is_empty()
         {
             match_set.insert(old_name.clone(), old_name.clone(), 1.0);
             matched_old_classes.insert(old_name.clone());
@@ -1724,6 +1797,699 @@ pub fn build_class_match_set(
 ) -> ClassMatchSet {
     let match_result = run_match(old_classes, new_classes, params);
     build_class_match_set_from_result(old_classes, new_classes, &match_result)
+}
+
+/// Compute a class profile aggregating its 19 feature dimensions across all methods
+/// as well as class-level metadata (superclass, distinct APIs, distinct strings).
+pub fn compute_class_profile(c: &SmaliClass) -> ClassProfile {
+    let pkg_name = get_package_name(&c.name.as_jni_type()).unwrap_or_default();
+    let mut num_instructions = 0usize;
+    let mut register_count = 0usize;
+    let mut has_branches = 0usize;
+    let mut try_catch_count = 0usize;
+    let mut field_access_count = 0usize;
+    let mut num_params = 0usize;
+    let mut is_constructor_count = 0usize;
+    let mut invoke_virtual_count = 0usize;
+    let mut invoke_static_count = 0usize;
+    let mut invoke_direct_count = 0usize;
+    let mut invoke_interface_count = 0usize;
+    let mut ext_android_count = 0usize;
+    let mut ext_java_count = 0usize;
+    let mut ext_kotlin_count = 0usize;
+    let mut ext_other_count = 0usize;
+    let mut distinct_api_calls = FxHashSet::default();
+    let mut distinct_strings = FxHashSet::default();
+
+    for m in &c.methods {
+        let (feats, _, apis, strs) = extract_method_features(m, &pkg_name);
+        num_instructions += feats[IDX_NUM_INSTRUCTIONS] as usize;
+        register_count += feats[IDX_REGISTER_COUNT] as usize;
+        has_branches += feats[IDX_HAS_BRANCHES] as usize;
+        try_catch_count += feats[IDX_TRY_CATCH] as usize;
+        field_access_count += feats[IDX_FIELD_ACCESS] as usize;
+        num_params += feats[IDX_NUM_PARAMS] as usize;
+        is_constructor_count += feats[IDX_IS_CONSTRUCTOR] as usize;
+        invoke_virtual_count += feats[IDX_INVOKE_VIRTUAL] as usize;
+        invoke_static_count += feats[IDX_INVOKE_STATIC] as usize;
+        invoke_direct_count += feats[IDX_INVOKE_DIRECT] as usize;
+        invoke_interface_count += feats[IDX_INVOKE_INTERFACE] as usize;
+        ext_android_count += feats[IDX_EXT_ANDROID] as usize;
+        ext_java_count += feats[IDX_EXT_JAVA] as usize;
+        ext_kotlin_count += feats[IDX_EXT_KOTLIN] as usize;
+        ext_other_count += feats[IDX_EXT_OTHER] as usize;
+        for api in apis {
+            distinct_api_calls.insert(api);
+        }
+        for s in strs {
+            distinct_strings.insert(s);
+        }
+    }
+
+    ClassProfile {
+        class_name: c.name.as_java_type(),
+        super_class: Some(c.super_class.as_java_type()),
+        method_count: c.methods.len(),
+        num_instructions,
+        register_count,
+        has_branches,
+        try_catch_count,
+        field_access_count,
+        num_params,
+        is_constructor_count,
+        invoke_virtual_count,
+        invoke_static_count,
+        invoke_direct_count,
+        invoke_interface_count,
+        ext_android_count,
+        ext_java_count,
+        ext_kotlin_count,
+        ext_other_count,
+        distinct_api_calls: distinct_api_calls.len(),
+        distinct_strings: distinct_strings.len(),
+    }
+}
+
+/// Compute package matching debug information including score breakdown
+/// (WL, API, Strings, Hierarchy), match reason, and the top 5 runner-up packages.
+pub fn compute_package_debug_info(
+    old_classes: &[SmaliClass],
+    new_classes: &[SmaliClass],
+    params: &MatchParams,
+    match_result: &MatchResult,
+) -> Vec<PackageMatchDebug> {
+    let (old_data, _, old_api_fps, old_string_fps) =
+        build_package_graphs(old_classes, &params.excluded_features);
+    let (new_data, _, new_api_fps, new_string_fps) =
+        build_package_graphs(new_classes, &params.excluded_features);
+    let dim_mask = feature_dim_mask(&params.excluded_features);
+    let (old_sigs, new_sigs, _, new_names, old_no_graph, _) =
+        compute_sigs_and_names(&old_data, &new_data, params.wl_iterations, &dim_mask);
+
+    let old = SideData {
+        sigs: &old_sigs,
+        names: &[],
+        no_graph: &old_no_graph,
+        api_fps: &old_api_fps,
+        string_fps: &old_string_fps,
+    };
+    let new = SideData {
+        sigs: &new_sigs,
+        names: &new_names,
+        no_graph: &[],
+        api_fps: &new_api_fps,
+        string_fps: &new_string_fps,
+    };
+
+    let (wl_weight, api_weight, string_weight, hier_weight) = effective_weights(params);
+
+    // Build match map from match_result for hier_factor calculation
+    let mut match_map: FxHashMap<&str, &str> = FxHashMap::default();
+    for (on, nn, score, status) in &match_result.results {
+        if status != "REMOVED" && status != "NEW" && *score > 0.0 && on != "---" && nn != "---" {
+            match_map.insert(on.as_str(), nn.as_str());
+        }
+    }
+
+    let mut debug_entries = Vec::new();
+
+    for (old_pkg, new_pkg, score, status) in &match_result.results {
+        if status == "EMPTY" {
+            debug_entries.push(PackageMatchDebug {
+                old_package: old_pkg.clone(),
+                new_package: new_pkg.clone(),
+                status: status.clone(),
+                total_score: *score,
+                matched_wl_score: 0.0,
+                matched_api_score: 0.0,
+                matched_string_score: 0.0,
+                matched_hier_factor: 1.0,
+                match_reason:
+                    "Both packages contain 0 methods (empty packages match by exact name)"
+                        .to_string(),
+                top_alternatives: Vec::new(),
+            });
+            continue;
+        }
+
+        if old_pkg == "---" {
+            // Newly added package
+            debug_entries.push(PackageMatchDebug {
+                old_package: old_pkg.clone(),
+                new_package: new_pkg.clone(),
+                status: status.clone(),
+                total_score: *score,
+                matched_wl_score: 0.0,
+                matched_api_score: 0.0,
+                matched_string_score: 0.0,
+                matched_hier_factor: 1.0,
+                match_reason: "Package added in new APK (no matching old package)".to_string(),
+                top_alternatives: Vec::new(),
+            });
+            continue;
+        }
+
+        if !old.sigs.contains_key(old_pkg) {
+            // Old package had no graph (empty package that was removed)
+            debug_entries.push(PackageMatchDebug {
+                old_package: old_pkg.clone(),
+                new_package: new_pkg.clone(),
+                status: status.clone(),
+                total_score: *score,
+                matched_wl_score: 0.0,
+                matched_api_score: 0.0,
+                matched_string_score: 0.0,
+                matched_hier_factor: 1.0,
+                match_reason: "Package had 0 methods in old APK and was removed".to_string(),
+                top_alternatives: Vec::new(),
+            });
+            continue;
+        }
+
+        // Calculate scores against all candidate new packages with graph
+        let sig_a = &old.sigs[old_pkg];
+        let fp_a = old.api_fps.get(old_pkg);
+        let sfp_a = old.string_fps.get(old_pkg);
+
+        let mut candidate_scores: Vec<PackageCandidateDebug> = Vec::new();
+        for nn in new.names {
+            let sig_b = &new.sigs[nn];
+            let fp_b = new.api_fps.get(nn);
+            let sfp_b = new.string_fps.get(nn);
+
+            let s_wl = wl_similarity(&sig_a.hists, &sig_b.hists);
+            let s_api = match (fp_a, fp_b) {
+                (Some(a), Some(b)) => api_similarity(a, b),
+                _ => 0.0,
+            };
+            let s_string = match (sfp_a, sfp_b) {
+                (Some(a), Some(b)) => string_similarity(a, b),
+                _ => 0.0,
+            };
+            let base_s = wl_weight * s_wl + api_weight * s_api + string_weight * s_string;
+            let hier_factor = if base_s > 0.0 && hier_weight > 0.0 {
+                let n_consistent = ancestor_chain(old_pkg)
+                    .iter()
+                    .zip(ancestor_chain(nn).iter())
+                    .filter(|(oa, na)| match_map.get(oa.as_str()).copied() == Some(na.as_str()))
+                    .count();
+                let n_levels = ancestor_chain(old_pkg)
+                    .len()
+                    .min(ancestor_chain(nn).len())
+                    .max(1);
+                1.0 + hier_weight * (n_consistent as f64 / n_levels as f64)
+            } else {
+                1.0
+            };
+            let mut cand_total = (base_s * hier_factor).min(1.0);
+            if params.use_node_matching {
+                cand_total *= node_label_consistency(sig_a, sig_b);
+            }
+
+            candidate_scores.push(PackageCandidateDebug {
+                package_name: nn.clone(),
+                total_score: cand_total,
+                wl_score: s_wl,
+                api_score: s_api,
+                string_score: s_string,
+                hier_factor,
+            });
+        }
+
+        // Find the matched candidate details
+        let (matched_wl, matched_api, matched_string, matched_hier) = if new_pkg != "---" {
+            if let Some(cand) = candidate_scores.iter().find(|c| &c.package_name == new_pkg) {
+                (
+                    cand.wl_score,
+                    cand.api_score,
+                    cand.string_score,
+                    cand.hier_factor,
+                )
+            } else {
+                (0.0, 0.0, 0.0, 1.0)
+            }
+        } else {
+            (0.0, 0.0, 0.0, 1.0)
+        };
+
+        // Filter out the chosen match from alternatives, sort descending by total_score, take top 5
+        let mut alternatives: Vec<PackageCandidateDebug> = candidate_scores
+            .into_iter()
+            .filter(|c| c.package_name != *new_pkg)
+            .collect();
+        alternatives.sort_by(|a, b| {
+            b.total_score
+                .partial_cmp(&a.total_score)
+                .unwrap_or(std::cmp::Ordering::Equal)
+        });
+        alternatives.truncate(5);
+
+        let match_reason = match status.as_str() {
+            "MATCH" => format!(
+                "Matched: combined score ({:.4}) >= match_threshold ({:.4})",
+                score, params.match_threshold
+            ),
+            "CHANGED" => format!(
+                "Changed: combined score ({:.4}) in [change_threshold ({:.4}), match_threshold ({:.4}))",
+                score, params.change_threshold, params.match_threshold
+            ),
+            "REMOVED" => {
+                if alternatives.is_empty() {
+                    "Removed: no candidate packages available in new APK".to_string()
+                } else if alternatives[0].total_score < params.change_threshold {
+                    format!(
+                        "Removed: highest candidate score ({:.4}) < change_threshold ({:.4})",
+                        alternatives[0].total_score, params.change_threshold
+                    )
+                } else {
+                    format!(
+                        "Removed: best candidate '{}' (score: {:.4}) was greedily assigned to another package",
+                        alternatives[0].package_name, alternatives[0].total_score
+                    )
+                }
+            }
+            _ => format!("Status: {}", status),
+        };
+
+        debug_entries.push(PackageMatchDebug {
+            old_package: old_pkg.clone(),
+            new_package: new_pkg.clone(),
+            status: status.clone(),
+            total_score: *score,
+            matched_wl_score: matched_wl,
+            matched_api_score: matched_api,
+            matched_string_score: matched_string,
+            matched_hier_factor: matched_hier,
+            match_reason,
+            top_alternatives: alternatives,
+        });
+    }
+
+    debug_entries
+}
+
+/// Debug class matching between two APKs based on a package-level [`MatchResult`].
+/// Returns full pairing details, aggregated 19-dimensional class profiles, reasons,
+/// and the top 5 alternative candidate classes.
+pub fn debug_class_matches(
+    old_classes: &[SmaliClass],
+    new_classes: &[SmaliClass],
+    match_result: &MatchResult,
+) -> Vec<ClassMatchDebug> {
+    let mut debug_results = Vec::new();
+    let mut matched_old_classes = FxHashSet::default();
+    let mut matched_new_classes = FxHashSet::default();
+
+    // Map matched packages: old_pkg_dot -> (new_pkg_dot, old_pkg_slash, new_pkg_slash, score)
+    let mut pkg_matches: Vec<(String, String, String, String, f64)> = Vec::new();
+    for (old_pkg_slash, new_pkg_slash, score, status) in &match_result.results {
+        if (status == "MATCH" || status == "CHANGED" || status == "EMPTY")
+            && *score > 0.0
+            && old_pkg_slash != "---"
+            && new_pkg_slash != "---"
+        {
+            let old_dot = old_pkg_slash.replace('/', ".");
+            let new_dot = new_pkg_slash.replace('/', ".");
+            pkg_matches.push((
+                old_dot,
+                new_dot,
+                old_pkg_slash.clone(),
+                new_pkg_slash.clone(),
+                *score,
+            ));
+        }
+    }
+
+    // Step 1 & 2: Pair classes within matched packages
+    for (old_pkg_dot, new_pkg_dot, old_pkg_slash, new_pkg_slash, pkg_score) in pkg_matches {
+        let old_pkg_classes: Vec<&SmaliClass> = old_classes
+            .iter()
+            .filter(|c| {
+                let name = c.name.as_java_type();
+                get_package_from_java(&name) == old_pkg_dot && !matched_old_classes.contains(&name)
+            })
+            .collect();
+        let new_pkg_classes: Vec<&SmaliClass> = new_classes
+            .iter()
+            .filter(|c| {
+                let name = c.name.as_java_type();
+                get_package_from_java(&name) == new_pkg_dot && !matched_new_classes.contains(&name)
+            })
+            .collect();
+
+        // 1. Exact simple name match
+        for old_c in &old_pkg_classes {
+            let old_name = old_c.name.as_java_type();
+            if matched_old_classes.contains(&old_name) {
+                continue;
+            }
+            let old_simple = get_simple_name(&old_name).to_string();
+            let old_empty = old_c.methods.is_empty();
+            if let Some(new_c) = new_pkg_classes.iter().find(|nc| {
+                let new_name = nc.name.as_java_type();
+                !matched_new_classes.contains(&new_name)
+                    && get_simple_name(&new_name) == old_simple
+                    && nc.methods.is_empty() == old_empty
+            }) {
+                let new_name = new_c.name.as_java_type();
+                matched_old_classes.insert(old_name.clone());
+                matched_new_classes.insert(new_name.clone());
+
+                // Calculate alternatives from new_pkg_classes
+                let o_sum = summarize_class(old_c, &old_pkg_slash);
+                let mut alternatives: Vec<ClassCandidateDebug> = Vec::new();
+                for other_new in &new_pkg_classes {
+                    let on_name = other_new.name.as_java_type();
+                    if on_name == new_name {
+                        continue;
+                    }
+                    if other_new.methods.is_empty() != old_empty {
+                        continue;
+                    }
+                    let n_sum = summarize_class(other_new, &new_pkg_slash);
+                    let (s_api, s_str, s_super, s_cnt, sim) =
+                        compute_class_similarity_components(&o_sum, &n_sum);
+                    if sim > 0.0 {
+                        alternatives.push(ClassCandidateDebug {
+                            class_name: on_name,
+                            total_score: (pkg_score * sim).min(1.0),
+                            api_similarity: s_api,
+                            string_similarity: s_str,
+                            super_class_similarity: s_super,
+                            method_count_similarity: s_cnt,
+                        });
+                    }
+                }
+                alternatives.sort_by(|a, b| {
+                    b.total_score
+                        .partial_cmp(&a.total_score)
+                        .unwrap_or(std::cmp::Ordering::Equal)
+                });
+                alternatives.truncate(5);
+
+                let status = if old_empty {
+                    "EMPTY".to_string()
+                } else {
+                    "MATCH".to_string()
+                };
+                let match_reason = if old_empty {
+                    format!(
+                        "Exact simple name match '{}' between empty classes within package '{}' (package score: {:.4})",
+                        old_simple, old_pkg_slash, pkg_score
+                    )
+                } else {
+                    format!(
+                        "Exact simple name match '{}' within package '{}' (package score: {:.4})",
+                        old_simple, old_pkg_slash, pkg_score
+                    )
+                };
+
+                debug_results.push(ClassMatchDebug {
+                    old_class: Some(old_name),
+                    new_class: Some(new_name),
+                    status,
+                    score: pkg_score,
+                    match_reason,
+                    old_profile: Some(compute_class_profile(old_c)),
+                    new_profile: Some(compute_class_profile(new_c)),
+                    top_alternatives: alternatives,
+                });
+            }
+        }
+
+        // 2. Remaining unpaired classes within this package
+        let remaining_old: Vec<&SmaliClass> = old_pkg_classes
+            .into_iter()
+            .filter(|c| !matched_old_classes.contains(&c.name.as_java_type()))
+            .collect();
+        let remaining_new: Vec<&SmaliClass> = new_pkg_classes
+            .into_iter()
+            .filter(|c| !matched_new_classes.contains(&c.name.as_java_type()))
+            .collect();
+
+        if remaining_old.len() == 1 && remaining_new.len() == 1 {
+            let old_c = remaining_old[0];
+            let new_c = remaining_new[0];
+            if old_c.methods.is_empty() == new_c.methods.is_empty() {
+                let is_empty = old_c.methods.is_empty();
+                let old_name = old_c.name.as_java_type();
+                let new_name = new_c.name.as_java_type();
+                matched_old_classes.insert(old_name.clone());
+                matched_new_classes.insert(new_name.clone());
+
+                let status = if is_empty {
+                    "EMPTY".to_string()
+                } else {
+                    "MATCH".to_string()
+                };
+                let match_reason = if is_empty {
+                    format!(
+                        "Sole remaining unpaired empty class in package '{}' (package score: {:.4})",
+                        old_pkg_slash, pkg_score
+                    )
+                } else {
+                    format!(
+                        "Sole remaining unpaired class in package '{}' (package score: {:.4})",
+                        old_pkg_slash, pkg_score
+                    )
+                };
+
+                debug_results.push(ClassMatchDebug {
+                    old_class: Some(old_name),
+                    new_class: Some(new_name),
+                    status,
+                    score: pkg_score,
+                    match_reason,
+                    old_profile: Some(compute_class_profile(old_c)),
+                    new_profile: Some(compute_class_profile(new_c)),
+                    top_alternatives: Vec::new(),
+                });
+            }
+        } else if !remaining_old.is_empty() && !remaining_new.is_empty() {
+            let old_summaries: Vec<_> = remaining_old
+                .iter()
+                .map(|c| summarize_class(c, &old_pkg_slash))
+                .collect();
+            let new_summaries: Vec<_> = remaining_new
+                .iter()
+                .map(|c| summarize_class(c, &new_pkg_slash))
+                .collect();
+
+            struct CandidateClassPair {
+                old_idx: usize,
+                new_idx: usize,
+                components: (f64, f64, f64, f64, f64),
+            }
+
+            // Store candidate scores: for each old index, list of (new index, components, total_score)
+            let mut pair_scores: Vec<CandidateClassPair> = Vec::new();
+            for (oi, o_sum) in old_summaries.iter().enumerate() {
+                if remaining_old[oi].methods.is_empty() {
+                    continue;
+                }
+                for (ni, n_sum) in new_summaries.iter().enumerate() {
+                    if remaining_new[ni].methods.is_empty() {
+                        continue;
+                    }
+                    let components = compute_class_similarity_components(o_sum, n_sum);
+                    if components.4 > 0.0 {
+                        pair_scores.push(CandidateClassPair {
+                            old_idx: oi,
+                            new_idx: ni,
+                            components,
+                        });
+                    }
+                }
+            }
+            pair_scores.sort_by(|a, b| {
+                b.components
+                    .4
+                    .partial_cmp(&a.components.4)
+                    .unwrap_or(std::cmp::Ordering::Equal)
+            });
+
+            // Keep track of assignments made in this step
+            let mut assigned_old = FxHashSet::default();
+            let mut assigned_new = FxHashSet::default();
+            let mut step2_assignments: Vec<CandidateClassPair> = Vec::new();
+
+            for pair in pair_scores {
+                if !assigned_old.contains(&pair.old_idx) && !assigned_new.contains(&pair.new_idx) {
+                    assigned_old.insert(pair.old_idx);
+                    assigned_new.insert(pair.new_idx);
+                    step2_assignments.push(pair);
+                }
+            }
+
+            for pair in step2_assignments {
+                let oi = pair.old_idx;
+                let ni = pair.new_idx;
+                let comps = pair.components;
+                let old_c = remaining_old[oi];
+                let new_c = remaining_new[ni];
+                let old_name = old_c.name.as_java_type();
+                let new_name = new_c.name.as_java_type();
+                matched_old_classes.insert(old_name.clone());
+                matched_new_classes.insert(new_name.clone());
+
+                let mut alternatives: Vec<ClassCandidateDebug> = Vec::new();
+                for (other_ni, other_new) in remaining_new.iter().enumerate() {
+                    if other_ni == ni {
+                        continue;
+                    }
+                    if other_new.methods.is_empty() != old_c.methods.is_empty() {
+                        continue;
+                    }
+                    let other_comps = compute_class_similarity_components(
+                        &old_summaries[oi],
+                        &new_summaries[other_ni],
+                    );
+                    if other_comps.4 > 0.0 {
+                        alternatives.push(ClassCandidateDebug {
+                            class_name: other_new.name.as_java_type(),
+                            total_score: (pkg_score * other_comps.4).min(1.0),
+                            api_similarity: other_comps.0,
+                            string_similarity: other_comps.1,
+                            super_class_similarity: other_comps.2,
+                            method_count_similarity: other_comps.3,
+                        });
+                    }
+                }
+                alternatives.sort_by(|a, b| {
+                    b.total_score
+                        .partial_cmp(&a.total_score)
+                        .unwrap_or(std::cmp::Ordering::Equal)
+                });
+                alternatives.truncate(5);
+
+                let class_score = (pkg_score * comps.4).min(1.0);
+                debug_results.push(ClassMatchDebug {
+                    old_class: Some(old_name),
+                    new_class: Some(new_name),
+                    status: "MATCH".to_string(),
+                    score: class_score,
+                    match_reason: format!(
+                        "Similarity match in package '{}' (package score: {:.4}, class sim: {:.4} [API: {:.2}, String: {:.2}, Super: {:.2}, Method Count: {:.2}])",
+                        old_pkg_slash, pkg_score, comps.4, comps.0, comps.1, comps.2, comps.3
+                    ),
+                    old_profile: Some(compute_class_profile(old_c)),
+                    new_profile: Some(compute_class_profile(new_c)),
+                    top_alternatives: alternatives,
+                });
+            }
+        }
+    }
+
+    // Step 3: Match identical class names that were not part of an obfuscated package change
+    let new_name_set: FxHashMap<String, &SmaliClass> = new_classes
+        .iter()
+        .map(|c| (c.name.as_java_type(), c))
+        .collect();
+
+    for old_c in old_classes {
+        let old_name = old_c.name.as_java_type();
+        if !matched_old_classes.contains(&old_name)
+            && let Some(new_c) = new_name_set.get(&old_name)
+            && !matched_new_classes.contains(&old_name)
+            && old_c.methods.is_empty() == new_c.methods.is_empty()
+        {
+            matched_old_classes.insert(old_name.clone());
+            matched_new_classes.insert(old_name.clone());
+
+            let is_empty = old_c.methods.is_empty();
+            let status = if is_empty {
+                "EMPTY".to_string()
+            } else {
+                "MATCH".to_string()
+            };
+            let match_reason = if is_empty {
+                "Identical class name match across packages between empty classes".to_string()
+            } else {
+                "Identical class name match across packages".to_string()
+            };
+
+            debug_results.push(ClassMatchDebug {
+                old_class: Some(old_name.clone()),
+                new_class: Some(old_name),
+                status,
+                score: 1.0,
+                match_reason,
+                old_profile: Some(compute_class_profile(old_c)),
+                new_profile: Some(compute_class_profile(new_c)),
+                top_alternatives: Vec::new(),
+            });
+        }
+    }
+
+    // Step 4: Unmatched old classes (REMOVED / EMPTY)
+    for old_c in old_classes {
+        let old_name = old_c.name.as_java_type();
+        if !matched_old_classes.contains(&old_name) {
+            let is_empty = old_c.methods.is_empty();
+            let status = if is_empty {
+                "EMPTY".to_string()
+            } else {
+                "REMOVED".to_string()
+            };
+            let match_reason = if is_empty {
+                "Empty class in old APK (no match found)".to_string()
+            } else {
+                "Class removed in new APK (no match found)".to_string()
+            };
+            debug_results.push(ClassMatchDebug {
+                old_class: Some(old_name),
+                new_class: None,
+                status,
+                score: 0.0,
+                match_reason,
+                old_profile: Some(compute_class_profile(old_c)),
+                new_profile: None,
+                top_alternatives: Vec::new(),
+            });
+        }
+    }
+
+    // Step 5: Unmatched new classes (NEW / EMPTY)
+    for new_c in new_classes {
+        let new_name = new_c.name.as_java_type();
+        if !matched_new_classes.contains(&new_name) {
+            let is_empty = new_c.methods.is_empty();
+            let status = if is_empty {
+                "EMPTY".to_string()
+            } else {
+                "NEW".to_string()
+            };
+            let match_reason = if is_empty {
+                "Empty class in new APK (no matching old class)".to_string()
+            } else {
+                "Class added in new APK (no matching old class)".to_string()
+            };
+            debug_results.push(ClassMatchDebug {
+                old_class: None,
+                new_class: Some(new_name),
+                status,
+                score: 0.0,
+                match_reason,
+                old_profile: None,
+                new_profile: Some(compute_class_profile(new_c)),
+                top_alternatives: Vec::new(),
+            });
+        }
+    }
+
+    debug_results.sort_by(|a, b| {
+        let a_key = a
+            .old_class
+            .as_deref()
+            .unwrap_or_else(|| a.new_class.as_deref().unwrap_or(""));
+        let b_key = b
+            .old_class
+            .as_deref()
+            .unwrap_or_else(|| b.new_class.as_deref().unwrap_or(""));
+        a_key.cmp(b_key)
+    });
+
+    debug_results
 }
 
 #[cfg(test)]
@@ -2352,6 +3118,57 @@ mod tests {
         );
     }
 
+    #[test]
+    fn test_match_packages_both_empty() {
+        let empty_fps: ApiFingerprints = FxHashMap::default();
+        let empty_sfps: StringFingerprints = FxHashMap::default();
+        let old_sd = SideData {
+            sigs: &FxHashMap::default(),
+            names: &[],
+            no_graph: &["pkgBothEmpty".to_string(), "pkgOldOnlyEmpty".to_string()],
+            api_fps: &empty_fps,
+            string_fps: &empty_sfps,
+        };
+        let new_sd = SideData {
+            sigs: &FxHashMap::default(),
+            names: &[],
+            no_graph: &["pkgBothEmpty".to_string(), "pkgNewOnlyEmpty".to_string()],
+            api_fps: &empty_fps,
+            string_fps: &empty_sfps,
+        };
+        let params = MatchParams {
+            match_threshold: 0.8,
+            change_threshold: 0.0,
+            wl_iterations: 0,
+            use_node_matching: false,
+            api_weight: 0.0,
+            hier_weight: 0.0,
+            string_weight: 0.0,
+            excluded_features: vec![],
+        };
+        let results = match_packages(
+            &old_sd,
+            &new_sd,
+            &params,
+            &FxHashMap::default(),
+            &FxHashMap::default(),
+        );
+
+        assert_eq!(results.len(), 3);
+        assert!(results.iter().any(|r| r.0 == "pkgBothEmpty"
+            && r.1 == "pkgBothEmpty"
+            && (r.2 - 1.0).abs() < 1e-9
+            && r.3 == "EMPTY"));
+        assert!(results.iter().any(|r| r.0 == "pkgOldOnlyEmpty"
+            && r.1 == "---"
+            && (r.2 - 0.0).abs() < 1e-9
+            && r.3 == "REMOVED"));
+        assert!(results.iter().any(|r| r.0 == "---"
+            && r.1 == "pkgNewOnlyEmpty"
+            && (r.2 - 0.0).abs() < 1e-9
+            && r.3 == "NEW"));
+    }
+
     fn make_test_class(name: &str, methods: Vec<SmaliMethod>) -> SmaliClass {
         use smali::types::ObjectIdentifier;
         SmaliClass {
@@ -2365,6 +3182,96 @@ mod tests {
             methods,
             file_path: None,
         }
+    }
+
+    fn make_test_method(name: &str) -> SmaliMethod {
+        use smali::types::MethodSignature;
+        SmaliMethod {
+            name: name.to_string(),
+            modifiers: vec![],
+            constructor: false,
+            signature: MethodSignature::from_jni("()V"),
+            locals: 0,
+            registers: None,
+            params: vec![],
+            annotations: vec![],
+            ops: vec![],
+        }
+    }
+
+    #[test]
+    fn test_name_matching_only_applies_to_empty_packages() {
+        // Class in package A: empty (0 methods) in both old and new
+        let old_a = make_test_class("com.example.empty.A", vec![]);
+        let new_a = make_test_class("com.example.empty.A", vec![]);
+
+        // Class in package B: has methods in old, but empty (0 methods) in new
+        let old_b = make_test_class("com.example.halfempty.B", vec![make_test_method("m1")]);
+        let new_b = make_test_class("com.example.halfempty.B", vec![]);
+
+        // Class in package C: empty in old, but has methods in new
+        let old_c = make_test_class("com.example.otherhalf.C", vec![]);
+        let new_c = make_test_class("com.example.otherhalf.C", vec![make_test_method("m2")]);
+
+        // Class in package D: has methods in both old and new
+        let old_d = make_test_class("com.example.hasmethods.D", vec![make_test_method("m3")]);
+        let new_d = make_test_class("com.example.hasmethods.D", vec![make_test_method("m4")]);
+
+        let old_classes = vec![old_a, old_b, old_c, old_d];
+        let new_classes = vec![new_a, new_b, new_c, new_d];
+
+        let params = MatchParams {
+            match_threshold: 0.8,
+            change_threshold: 0.0,
+            wl_iterations: 1,
+            use_node_matching: false,
+            api_weight: 0.2,
+            hier_weight: 0.7,
+            string_weight: 0.3,
+            excluded_features: vec![],
+        };
+
+        let result = run_match(&old_classes, &new_classes, &params);
+
+        // 1. Only com/example/empty should be marked EMPTY
+        let empty_matches: Vec<_> = result.results.iter().filter(|r| r.3 == "EMPTY").collect();
+        assert_eq!(empty_matches.len(), 1);
+        assert_eq!(empty_matches[0].0, "com/example/empty");
+        assert_eq!(empty_matches[0].1, "com/example/empty");
+        assert_eq!(empty_matches[0].2, 1.0);
+
+        // 2. com/example/halfempty (methods in old, 0 in new) must NOT be matched by name as EMPTY
+        assert!(
+            !result
+                .results
+                .iter()
+                .any(
+                    |r| (r.0 == "com/example/halfempty" || r.1 == "com/example/halfempty")
+                        && r.3 == "EMPTY"
+                )
+        );
+
+        // 3. com/example/otherhalf (0 in old, methods in new) must NOT be matched by name as EMPTY
+        assert!(
+            !result
+                .results
+                .iter()
+                .any(
+                    |r| (r.0 == "com/example/otherhalf" || r.1 == "com/example/otherhalf")
+                        && r.3 == "EMPTY"
+                )
+        );
+
+        // 4. com/example/hasmethods (methods in both) must NOT be marked EMPTY
+        assert!(
+            !result
+                .results
+                .iter()
+                .any(
+                    |r| (r.0 == "com/example/hasmethods" || r.1 == "com/example/hasmethods")
+                        && r.3 == "EMPTY"
+                )
+        );
     }
 
     #[test]
@@ -2571,6 +3478,51 @@ mod tests {
     }
 
     #[test]
+    fn test_compute_match_summary_with_empty_package() {
+        let mut old_m = FxHashMap::default();
+        old_m.insert("com/matched".to_string(), 100);
+        old_m.insert("com/empty".to_string(), 0);
+        let mut new_m = FxHashMap::default();
+        new_m.insert("com/matched".to_string(), 100);
+        new_m.insert("com/empty".to_string(), 0);
+
+        let res = MatchResult {
+            results: vec![
+                (
+                    "com/matched".to_string(),
+                    "com/matched".to_string(),
+                    1.0,
+                    "MATCH".to_string(),
+                ),
+                (
+                    "com/empty".to_string(),
+                    "com/empty".to_string(),
+                    1.0,
+                    "EMPTY".to_string(),
+                ),
+            ],
+            old_pkg_methods: old_m,
+            new_pkg_methods: new_m,
+        };
+
+        let metrics = compute_match_summary(&res);
+        assert_eq!(metrics.packages_total_union, 2);
+        assert_eq!(metrics.matched_packages, 1);
+        assert_eq!(metrics.empty_packages, 1);
+        assert_eq!(metrics.changed_packages, 0);
+        assert_eq!(metrics.removed_packages, 0);
+        assert_eq!(metrics.added_packages, 0);
+        assert!((metrics.packages_matched_ratio - 0.50).abs() < 1e-9);
+        assert!((metrics.packages_empty_ratio - 0.50).abs() < 1e-9);
+        assert_eq!(metrics.total_weighted_methods, 100);
+        assert!((metrics.code_in_matched_ratio - 1.0).abs() < 1e-9);
+        assert!((metrics.code_in_empty_ratio - 0.0).abs() < 1e-9);
+        assert!((metrics.app_similarity_score - 1.0).abs() < 1e-9);
+        assert!((metrics.app_change_distance - 0.0).abs() < 1e-9);
+        assert!((metrics.unweighted_similarity - 1.0).abs() < 1e-9);
+    }
+
+    #[test]
     fn test_effective_weights_defaults() {
         let params = MatchParams {
             match_threshold: 0.8,
@@ -2696,5 +3648,425 @@ mod tests {
         // WL excluded and both api/string weights are 0: no retained weight remains.
         let (wl, api, string, _hier) = effective_weights(&params);
         assert!(wl == 0.0 && api == 0.0 && string == 0.0);
+    }
+
+    #[test]
+    fn test_compute_class_profile() {
+        let mut m = make_test_method("testMethod");
+        m.locals = 4;
+        m.registers = Some(6);
+        m.constructor = true;
+        m.ops = vec![
+            SmaliOp::Op(DexOp::ConstString {
+                dest: SmaliRegister::Local(0),
+                value: "hello".to_string(),
+            }),
+            SmaliOp::Op(DexOp::Goto {
+                offset: Label("end".to_string()),
+            }),
+            SmaliOp::Op(DexOp::InvokeVirtual {
+                registers: vec![SmaliRegister::Local(0)],
+                method: MethodRef {
+                    class: "Landroid/util/Log;".to_string(),
+                    name: "d".to_string(),
+                    descriptor: "(Ljava/lang/String;Ljava/lang/String;)I".to_string(),
+                },
+            }),
+            SmaliOp::Catch(smali::types::CatchDirective::CatchAll {
+                try_range: smali::types::TryRange {
+                    start: Label("start".to_string()),
+                    end: Label("end".to_string()),
+                },
+                handler: Label("handler".to_string()),
+            }),
+        ];
+
+        let cls = make_test_class("com.example.ProfileTest", vec![m]);
+        let prof = compute_class_profile(&cls);
+
+        assert_eq!(prof.class_name, "com.example.ProfileTest");
+        assert_eq!(prof.super_class.as_deref(), Some("java.lang.Object"));
+        assert_eq!(prof.method_count, 1);
+        assert_eq!(prof.num_instructions, 3);
+        assert_eq!(prof.register_count, 6);
+        assert_eq!(prof.has_branches, 1);
+        assert_eq!(prof.try_catch_count, 1);
+        assert_eq!(prof.is_constructor_count, 1);
+        assert_eq!(prof.invoke_virtual_count, 1);
+        assert_eq!(prof.ext_android_count, 1);
+        assert_eq!(prof.distinct_strings, 1);
+        assert_eq!(prof.distinct_api_calls, 1);
+    }
+
+    #[test]
+    fn test_compute_package_debug_info() {
+        let old_c = make_test_class("com.example.pkg1.A", vec![make_test_method("m1")]);
+        let new_c = make_test_class("com.example.pkg1.A", vec![make_test_method("m1")]);
+
+        let old_classes = vec![old_c];
+        let new_classes = vec![new_c];
+
+        let params = MatchParams {
+            match_threshold: 0.8,
+            change_threshold: 0.0,
+            wl_iterations: 1,
+            use_node_matching: false,
+            api_weight: 0.2,
+            hier_weight: 0.7,
+            string_weight: 0.3,
+            excluded_features: vec![],
+        };
+
+        let match_result = run_match(&old_classes, &new_classes, &params);
+        let pkg_debug =
+            compute_package_debug_info(&old_classes, &new_classes, &params, &match_result);
+
+        assert_eq!(pkg_debug.len(), 1);
+        let p = &pkg_debug[0];
+        assert_eq!(p.old_package, "com/example/pkg1");
+        assert_eq!(p.new_package, "com/example/pkg1");
+        assert_eq!(p.status, "MATCH");
+        assert!(p.total_score >= 0.8);
+        assert!(p.match_reason.contains("Matched:"));
+        assert!(p.top_alternatives.is_empty());
+    }
+
+    #[test]
+    fn test_debug_class_matches_top_5_alternatives() {
+        // Create 1 class in old package
+        let old_cls = make_test_class("com.example.pkg1.Target", vec![make_test_method("main")]);
+
+        // Create 8 candidate classes in new package to verify truncation to 5 runner-ups
+        let mut new_classes = Vec::new();
+        for i in 0..8 {
+            let name = format!("com.example.pkg1.Cand{}", i);
+            let mut m = make_test_method("main");
+            m.locals = i as u32;
+            new_classes.push(make_test_class(&name, vec![m]));
+        }
+
+        let old_classes = vec![old_cls];
+
+        let params = MatchParams {
+            match_threshold: 0.8,
+            change_threshold: 0.0,
+            wl_iterations: 1,
+            use_node_matching: false,
+            api_weight: 0.2,
+            hier_weight: 0.7,
+            string_weight: 0.3,
+            excluded_features: vec![],
+        };
+
+        let match_result = run_match(&old_classes, &new_classes, &params);
+        let class_debug = debug_class_matches(&old_classes, &new_classes, &match_result);
+
+        // Find the matched class entry
+        let matched = class_debug
+            .iter()
+            .find(|c| c.old_class.as_deref() == Some("com.example.pkg1.Target"));
+        assert!(matched.is_some());
+        let m = matched.unwrap();
+        assert_eq!(m.status, "MATCH");
+        assert!(m.old_profile.is_some());
+        assert!(m.new_profile.is_some());
+        // Runner-up alternatives must be capped at 5
+        assert_eq!(m.top_alternatives.len(), 5);
+        // Verify alternatives are sorted in descending order of total_score
+        for w in m.top_alternatives.windows(2) {
+            assert!(w[0].total_score >= w[1].total_score);
+        }
+    }
+
+    #[test]
+    fn test_empty_class_does_not_match_non_empty_class_step1() {
+        let old_cls = vec![make_test_class("com.example.Foo", vec![])];
+        let new_cls = vec![make_test_class(
+            "com.example.Foo",
+            vec![make_test_method("bar")],
+        )];
+        let res = MatchResult {
+            results: vec![(
+                "com/example".to_string(),
+                "com/example".to_string(),
+                1.0,
+                "MATCH".to_string(),
+            )],
+            old_pkg_methods: FxHashMap::default(),
+            new_pkg_methods: FxHashMap::default(),
+        };
+        let match_set = build_class_match_set_from_result(&old_cls, &new_cls, &res);
+        assert_eq!(match_set.get_new_class("com.example.Foo"), None);
+        assert_eq!(match_set.get_old_class("com.example.Foo"), None);
+    }
+
+    #[test]
+    fn test_empty_class_does_not_match_non_empty_class_step2a() {
+        let old_cls = vec![make_test_class("com.example.OldFoo", vec![])];
+        let new_cls = vec![make_test_class(
+            "com.example.NewBar",
+            vec![make_test_method("bar")],
+        )];
+        let res = MatchResult {
+            results: vec![(
+                "com/example".to_string(),
+                "com/example".to_string(),
+                1.0,
+                "MATCH".to_string(),
+            )],
+            old_pkg_methods: FxHashMap::default(),
+            new_pkg_methods: FxHashMap::default(),
+        };
+        let match_set = build_class_match_set_from_result(&old_cls, &new_cls, &res);
+        assert_eq!(match_set.get_new_class("com.example.OldFoo"), None);
+        assert_eq!(match_set.get_old_class("com.example.NewBar"), None);
+    }
+
+    #[test]
+    fn test_empty_class_does_not_match_non_empty_class_step2b() {
+        let old_cls = vec![
+            make_test_class("com.example.EmptyOld", vec![]),
+            make_test_class("com.example.WorkerOld", vec![make_test_method("work")]),
+        ];
+        let new_cls = vec![
+            make_test_class("com.example.EmptyNew", vec![]),
+            make_test_class("com.example.WorkerNew", vec![make_test_method("work")]),
+        ];
+        let res = MatchResult {
+            results: vec![(
+                "com/example".to_string(),
+                "com/example".to_string(),
+                1.0,
+                "MATCH".to_string(),
+            )],
+            old_pkg_methods: FxHashMap::default(),
+            new_pkg_methods: FxHashMap::default(),
+        };
+        let match_set = build_class_match_set_from_result(&old_cls, &new_cls, &res);
+        // Worker classes match by similarity
+        assert_eq!(
+            match_set.get_new_class("com.example.WorkerOld"),
+            Some("com.example.WorkerNew")
+        );
+        // Empty classes cannot match by similarity
+        assert_eq!(match_set.get_new_class("com.example.EmptyOld"), None);
+        assert_eq!(match_set.get_old_class("com.example.EmptyNew"), None);
+    }
+
+    #[test]
+    fn test_empty_class_does_not_match_non_empty_class_step3() {
+        let old_cls = vec![make_test_class("other.pkg.Identical", vec![])];
+        let new_cls = vec![make_test_class(
+            "other.pkg.Identical",
+            vec![make_test_method("run")],
+        )];
+        // No matched package results for other.pkg
+        let res = MatchResult {
+            results: vec![],
+            old_pkg_methods: FxHashMap::default(),
+            new_pkg_methods: FxHashMap::default(),
+        };
+        let match_set = build_class_match_set_from_result(&old_cls, &new_cls, &res);
+        assert_eq!(match_set.get_new_class("other.pkg.Identical"), None);
+        assert_eq!(match_set.get_old_class("other.pkg.Identical"), None);
+    }
+
+    #[test]
+    fn test_two_empty_classes_can_match_by_name() {
+        let old_cls = vec![
+            make_test_class("com.example.Foo", vec![]),
+            make_test_class("other.pkg.Bar", vec![]),
+        ];
+        let new_cls = vec![
+            make_test_class("com.example.Foo", vec![]),
+            make_test_class("other.pkg.Bar", vec![]),
+        ];
+        let res = MatchResult {
+            results: vec![(
+                "com/example".to_string(),
+                "com/example".to_string(),
+                1.0,
+                "MATCH".to_string(),
+            )],
+            old_pkg_methods: FxHashMap::default(),
+            new_pkg_methods: FxHashMap::default(),
+        };
+        let match_set = build_class_match_set_from_result(&old_cls, &new_cls, &res);
+        // Step 1: within matched package
+        assert_eq!(
+            match_set.get_new_class("com.example.Foo"),
+            Some("com.example.Foo")
+        );
+        // Step 3: identical name across packages
+        assert_eq!(
+            match_set.get_new_class("other.pkg.Bar"),
+            Some("other.pkg.Bar")
+        );
+    }
+
+    #[test]
+    fn test_debug_class_matches_handles_empty_classes() {
+        let old_cls = vec![
+            make_test_class("com.example.Empty", vec![]),
+            make_test_class("com.example.Worker", vec![make_test_method("run")]),
+        ];
+        let new_cls = vec![
+            make_test_class("com.example.Empty", vec![make_test_method("nowHasMethod")]),
+            make_test_class("com.example.TrulyEmpty", vec![]),
+            make_test_class("com.example.Worker", vec![make_test_method("run")]),
+        ];
+        let res = MatchResult {
+            results: vec![(
+                "com/example".to_string(),
+                "com/example".to_string(),
+                1.0,
+                "MATCH".to_string(),
+            )],
+            old_pkg_methods: FxHashMap::default(),
+            new_pkg_methods: FxHashMap::default(),
+        };
+        let debug = debug_class_matches(&old_cls, &new_cls, &res);
+
+        // Worker should match Worker
+        let worker = debug
+            .iter()
+            .find(|c| c.old_class.as_deref() == Some("com.example.Worker"))
+            .unwrap();
+        assert_eq!(worker.status, "MATCH");
+        assert_eq!(worker.new_class.as_deref(), Some("com.example.Worker"));
+
+        // Empty should NOT match new com.example.Empty (since new is non-empty)
+        // Since old Empty has 0 methods, its status is EMPTY rather than REMOVED
+        let empty_entry = debug
+            .iter()
+            .find(|c| c.old_class.as_deref() == Some("com.example.Empty"))
+            .unwrap();
+        assert_eq!(empty_entry.status, "EMPTY");
+        assert!(empty_entry.match_reason.contains("Empty class in old APK"));
+
+        // TrulyEmpty has 0 methods in new_cls, so its status is EMPTY rather than NEW
+        let truly_empty_entry = debug
+            .iter()
+            .find(|c| c.new_class.as_deref() == Some("com.example.TrulyEmpty"))
+            .unwrap();
+        assert_eq!(truly_empty_entry.status, "EMPTY");
+        assert!(
+            truly_empty_entry
+                .match_reason
+                .contains("Empty class in new APK")
+        );
+
+        // The new com.example.Empty has methods, so it is reported as NEW
+        let new_empty_entry = debug
+            .iter()
+            .find(|c| c.new_class.as_deref() == Some("com.example.Empty"))
+            .unwrap();
+        assert_eq!(new_empty_entry.status, "NEW");
+
+        // Alternatives for worker should not contain empty classes like TrulyEmpty
+        for alt in &worker.top_alternatives {
+            assert_ne!(alt.class_name, "com.example.TrulyEmpty");
+        }
+    }
+
+    #[test]
+    fn test_debug_class_matches_matched_empty_classes_status_empty() {
+        let old_cls = vec![
+            make_test_class("com.example.SameNameEmpty", vec![]),
+            make_test_class("other.pkg.IdenticalEmpty", vec![]),
+        ];
+        let new_cls = vec![
+            make_test_class("com.example.SameNameEmpty", vec![]),
+            make_test_class("other.pkg.IdenticalEmpty", vec![]),
+        ];
+        let res = MatchResult {
+            results: vec![(
+                "com/example".to_string(),
+                "com/example".to_string(),
+                1.0,
+                "MATCH".to_string(),
+            )],
+            old_pkg_methods: FxHashMap::default(),
+            new_pkg_methods: FxHashMap::default(),
+        };
+        let debug = debug_class_matches(&old_cls, &new_cls, &res);
+
+        let step1 = debug
+            .iter()
+            .find(|c| c.old_class.as_deref() == Some("com.example.SameNameEmpty"))
+            .unwrap();
+        assert_eq!(step1.status, "EMPTY");
+        assert_eq!(
+            step1.new_class.as_deref(),
+            Some("com.example.SameNameEmpty")
+        );
+        assert!(step1.match_reason.contains("Exact simple name match"));
+
+        let step3 = debug
+            .iter()
+            .find(|c| c.old_class.as_deref() == Some("other.pkg.IdenticalEmpty"))
+            .unwrap();
+        assert_eq!(step3.status, "EMPTY");
+        assert_eq!(step3.new_class.as_deref(), Some("other.pkg.IdenticalEmpty"));
+        assert!(step3.match_reason.contains("between empty classes"));
+    }
+
+    #[test]
+    fn test_assign_greedy_handles_nan_score_without_panicking() {
+        let mut old_best = vec![(0, 0, f64::NAN), (1, 1, 0.8)];
+        let old_names = vec!["oldA".to_string(), "oldB".to_string()];
+        let new_names = vec!["pkgA".to_string(), "pkgB".to_string()];
+        let (results, _) = greedy_assign(&mut old_best, &old_names, &new_names, 0.8, 0.0, false);
+        assert!(!results.is_empty());
+    }
+
+    #[test]
+    fn test_node_matching_below_change_threshold_splits_into_removed_and_new() {
+        use smali::smali_ops::{DexOp, MethodRef};
+        use smali::types::SmaliOp;
+
+        let op = SmaliOp::Op(DexOp::InvokeVirtual {
+            registers: vec![],
+            method: MethodRef {
+                class: "Landroid/util/Log;".to_string(),
+                name: "d".to_string(),
+                descriptor: "()V".to_string(),
+            },
+        });
+
+        let mut m1 = make_test_method("m1");
+        m1.locals = 10;
+        m1.constructor = true;
+        m1.ops = vec![op.clone()];
+        let old_c = make_test_class("com.example.pkg1.A", vec![m1]);
+
+        let mut m2 = make_test_method("m2");
+        m2.locals = 0;
+        m2.constructor = false;
+        m2.ops = vec![op];
+        let new_c = make_test_class("com.example.pkg1.A", vec![m2]);
+
+        let params = MatchParams {
+            match_threshold: 0.8,
+            change_threshold: 0.5,
+            wl_iterations: 0,
+            use_node_matching: true,
+            api_weight: 1.0, // perfect API match (1.0) ensures pass 1 matches
+            hier_weight: 0.0,
+            string_weight: 0.0,
+            excluded_features: vec![],
+        };
+        let res = run_match(&[old_c], &[new_c], &params);
+
+        let has_broken_combined = res.results.iter().any(|r| r.3 == "REMOVED" && r.1 != "---");
+        assert!(
+            !has_broken_combined,
+            "REMOVED entries must have new_package = '---'"
+        );
+        let has_new = res
+            .results
+            .iter()
+            .any(|r| r.3 == "NEW" && r.1 == "com/example/pkg1");
+        assert!(has_new, "The rejected new package must be reported as NEW");
     }
 }

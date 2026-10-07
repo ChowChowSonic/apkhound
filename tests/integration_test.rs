@@ -169,6 +169,7 @@ fn test_match() {
             || stdout.contains("CHANGED")
             || stdout.contains("NEW")
             || stdout.contains("REMOVED")
+            || stdout.contains("EMPTY")
     );
 }
 
@@ -264,6 +265,31 @@ fn test_match_summary_csv() {
     assert!(stdout.contains("old_package,new_package,score,status"));
     assert!(stdout.contains("# Summary: Algorithm = Weisfeiler-Lehman"));
     assert!(stdout.contains("change_distance,"));
+}
+
+#[test]
+fn test_match_debug() {
+    let old = apk_path("org.videolan.vlc_3.5.4.apk");
+    let new = apk_path("org.videolan.vlc_3.7.1.apk");
+    if old.is_none() || new.is_none() {
+        eprintln!("skipping test_match_debug: APK files not found");
+        return;
+    }
+    let output = Command::new(binary_path())
+        .arg("match")
+        .arg(old.unwrap())
+        .arg(new.unwrap())
+        .arg("-f")
+        .arg("MainActivity")
+        .arg("--debug")
+        .output()
+        .expect("failed to run apkhound match --debug");
+    assert!(output.status.success());
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(stdout.contains("MATCHING DEBUG REPORT"));
+    assert!(stdout.contains("PACKAGE MATCHING BREAKDOWN"));
+    assert!(stdout.contains("CLASS MATCHING BREAKDOWN"));
+    assert!(stdout.contains("19 Dimensions"));
 }
 
 #[test]
@@ -660,4 +686,106 @@ fn test_match_obfuscated_single_apk_graceful() {
     assert!(output.status.success());
     let stdout = String::from_utf8_lossy(&output.stdout);
     assert!(stdout.contains("ANDROID MANIFEST"));
+}
+
+#[test]
+fn test_subcommands_support_blacklist_flag() {
+    let subcommands = ["callgraph", "compare", "extract", "match", "stats"];
+
+    for subcmd in subcommands {
+        let output = Command::new(binary_path())
+            .arg(subcmd)
+            .arg("--help")
+            .output()
+            .unwrap_or_else(|_| panic!("failed to run apkhound {} --help", subcmd));
+        assert!(
+            output.status.success(),
+            "{} --help failed with status {}",
+            subcmd,
+            output.status
+        );
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        assert!(
+            stdout.contains("-b")
+                && (stdout.contains("--blacklistclass") || stdout.contains("--blacklist")),
+            "{} --help does not advertise -b / --blacklistclass flag:\n{}",
+            subcmd,
+            stdout
+        );
+    }
+}
+
+#[test]
+fn test_compare_with_blacklist() {
+    let old = apk_path("org.videolan.vlc_3.5.4.apk");
+    let new = apk_path("org.videolan.vlc_3.7.1.apk");
+    if old.is_none() || new.is_none() {
+        eprintln!("skipping test_compare_with_blacklist: APK files not found");
+        return;
+    }
+    let output = Command::new(binary_path())
+        .arg("compare")
+        .arg(old.unwrap())
+        .arg(new.unwrap())
+        .arg("-b")
+        .arg("androidx")
+        .output()
+        .expect("failed to run apkhound compare with blacklist");
+    assert!(output.status.success());
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    for line in stdout.lines() {
+        let parts: Vec<&str> = line.splitn(3, ':').collect();
+        if parts.len() >= 2 {
+            let class_name = parts[1].trim();
+            assert!(
+                !class_name.contains("androidx"),
+                "Blacklisted 'androidx' found in class name: {}",
+                class_name
+            );
+        }
+    }
+}
+
+#[test]
+fn test_compare_with_whitelist_and_blacklist() {
+    let old = apk_path("org.videolan.vlc_3.5.4.apk");
+    let new = apk_path("org.videolan.vlc_3.7.1.apk");
+    if old.is_none() || new.is_none() {
+        eprintln!("skipping test_compare_with_whitelist_and_blacklist: APK files not found");
+        return;
+    }
+    let output = Command::new(binary_path())
+        .arg("compare")
+        .arg(old.unwrap())
+        .arg(new.unwrap())
+        .arg("-f")
+        .arg("org\\.videolan")
+        .arg("-b")
+        .arg("internal")
+        .output()
+        .expect("failed to run apkhound compare with whitelist and blacklist");
+    assert!(output.status.success());
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let mut checked_any = false;
+    for line in stdout.lines() {
+        let parts: Vec<&str> = line.splitn(3, ':').collect();
+        if parts.len() >= 2 {
+            let class_name = parts[1].trim();
+            assert!(
+                class_name.contains("org.videolan"),
+                "Expected whitelist 'org.videolan' in class name: {}",
+                class_name
+            );
+            assert!(
+                !class_name.contains("internal"),
+                "Blacklisted 'internal' found in class name: {}",
+                class_name
+            );
+            checked_any = true;
+        }
+    }
+    assert!(
+        checked_any,
+        "Expected at least one matching class in compare output"
+    );
 }

@@ -85,12 +85,13 @@ apkhound stats app-v1.0.apk app-v1.1.apk --match-obfuscated
 Extract a call graph from one or more APK files as a Graphviz DOT digraph.
 
 ```
-apkhound callgraph <apk_path>... [-f <regex>...] [--match-obfuscated]
+apkhound callgraph <apk_path>... [-f <regex>...] [-b <regex>...] [--match-obfuscated]
 ```
 
 | Flag | Description |
 |------|-------------|
 | `-f`, `--filterclass` | Regex filter for class/method names (repeatable) |
+| `-b`, `--blacklistclass` | Regex blacklist filter for class/method names (repeatable) |
 | `--match-obfuscated` | Correlate obfuscated classes between APKs and normalize names in the graph |
 
 ### `compare`
@@ -98,12 +99,13 @@ apkhound callgraph <apk_path>... [-f <regex>...] [--match-obfuscated]
 List methods that were added, removed, or changed between two APK versions.
 
 ```
-apkhound compare <old_apk> <new_apk> [-f <regex>...] [--match-obfuscated]
+apkhound compare <old_apk> <new_apk> [-f <regex>...] [-b <regex>...] [--match-obfuscated]
 ```
 
 | Flag | Description |
 |------|-------------|
 | `-f`, `--filterclass` | Regex filter for class names (repeatable) |
+| `-b`, `--blacklistclass` | Regex blacklist filter for class names (repeatable) |
 | `--match-obfuscated` | Run Weisfeiler-Lehman analysis first and match obfuscated/renamed classes between versions |
 
 Output prefixes: `ADDED:`, `REMOVED:`, `CHANGED:`.
@@ -113,13 +115,15 @@ Output prefixes: `ADDED:`, `REMOVED:`, `CHANGED:`.
 Dump smali source of changed methods to disk.
 
 ```
-apkhound extract <old_apk> <new_apk> <output_dir> [-f <class_regex>...] [-s <smali_regex>...] [--match-obfuscated]
+apkhound extract <old_apk> <new_apk> <output_dir> [-f <class_regex>...] [-b <class_regex>...] [-s <smali_regex>...] [--blacklistsmali <smali_regex>...] [--match-obfuscated]
 ```
 
 | Flag | Description |
 |------|-------------|
 | `-f`, `--filterclass` | Regex filter for class names (repeatable) |
+| `-b`, `--blacklistclass` | Regex blacklist filter for class names (repeatable) |
 | `-s`, `--filtersmali` | Regex filter for smali line content (repeatable) |
+| `--blacklistsmali` | Regex blacklist filter for smali line content (repeatable) |
 | `--match-obfuscated` | Run Weisfeiler-Lehman analysis first and pair obfuscated/renamed classes between versions |
 
 Output: `<output_dir>/old/` and `<output_dir>/new/` mirroring the original directory structure. This output is best viewed with a tool like [ripdiff](https://github.com/ChowChowSonic/ripdiff) to more easily get a sense of what changed.
@@ -182,11 +186,22 @@ apkhound match <old_apk> <new_apk> [options]
 | `--node-matching` | `false` | Enable node-label consistency check for more precise matching |
 | `--exclude-feature` | — | Exclude scoring features from the combined score. Accepts coarse components (`wl`, `api`, `string`, `hier`), individual WL feature dimensions (`in_degree`, `out_degree`, `ext_android`, `invoke_virtual`, `num_params`, `num_instructions`, `has_branches`, `string_consts`, `field_access`, `try_catch`, `register_count`, `is_constructor`, `return_type`, ...), and API-call categories (`api_android`, `api_androidx`, `api_java`, `api_kotlin`, `api_other`). Repeatable or comma-separated; excluding a coarse component renormalizes the remaining weights to sum to 1, excluding a WL dimension masks it before label hashing, and excluding an API category drops those calls from the API fingerprint (and masks the matching `ext_*` dimension) |
 | `-f`, `--filterclass` | — | Regex filter for class names (repeatable) |
+| `-b`, `--blacklistclass` | — | Regex blacklist filter for class names (repeatable) |
 | `--summary` | `false` | Display overall application change distance and multi-scalar summary (outputs ONLY the summary unless a format like `--csv` is specified) |
 | `--score-only` | `false` | Output only the overall change scalar (float in `[0.0, 1.0]`), ideal for CI/scripts |
+| `--debug` | `false` | Print in-depth debug report showing package and class match score breakdowns, 19-dimensional class profiles, and top 5 runner-up candidate matches |
 | `--match-obfuscated` | `false` | Enable obfuscation-aware matching mode across analysis passes |
 
-Each matched pair is classified as `MATCH`, `CHANGED`, `REMOVED`, or `NEW` based on the thresholds.
+Each matched pair is classified as `MATCH`, `CHANGED`, `REMOVED`, `NEW`, or `EMPTY` based on the thresholds and package contents.
+
+#### Matching Debug Report (`--debug`)
+
+When `--debug` is provided, `apkhound match` outputs an in-depth breakdown of the matching decisions:
+- **Package Matching Breakdown**: For each package, displays the final score and status, the decision reason (e.g. why matched, changed, or removed), the breakdown across the four scoring components (WL score, external API Jaccard, String constants Jaccard, Hierarchy consistency factor), and the top 5 runner-up alternative packages with their respective scores.
+- **Class Matching Breakdown**: Displays how classes were paired across packages (exact simple name, sole remaining unpaired class, similarity-based matching, or identical full class names). For each matched class pair:
+  - Aggregated **19-dimensional feature profile** for both old and new classes (methods, instructions, registers, branches, try/catch, field accesses, invoke types, external call categories, distinct API calls, distinct strings, and superclass).
+  - The exact match reason and similarity breakdown.
+  - The **top 5 runner-up alternative classes** from candidate pools along with their component similarity metrics (API similarity, String similarity, Superclass match, Method count similarity).
 
 #### Application Change Quantification (`--summary`, `--score-only`)
 
@@ -264,12 +279,13 @@ emit a metric diff between them. The command rejects any other number of
 APK paths.
 
 ```
-apkhound stats <apk_path> [<apk_path>] [-f <regex>...] [-g] [--format printed|json|csv] [--match-obfuscated]
+apkhound stats <apk_path> [<apk_path>] [-f <regex>...] [-b <regex>...] [-g] [--format printed|json|csv] [--match-obfuscated]
 ```
 
 | Flag | Default | Description |
 |------|---------|-------------|
 | `-f`, `--filterclass` | — | Regex filter for class names (repeatable) |
+| `-b`, `--blacklistclass` | — | Regex blacklist filter for class names (repeatable) |
 | `-g`, `--graph` | `false` | Also compute call-graph metrics (requires an extra parse pass) |
 | `--format` | `printed` | Output format: `printed`, `json`, or `csv` |
 | `--match-obfuscated` | `false` | Correlate obfuscated classes before computing diff and change coverage |
@@ -352,17 +368,17 @@ Packages from two APK versions are matched using a multi-component similarity pi
 
 10. **Default-package collapse handling**: R8's obfuscation often flattens the majority of classes into the unnamed `(default)` package, which would otherwise cause false many-to-one matches. When the `(default)` package is a candidate, the bijective greedy assignment is relaxed, allowing multiple old packages to find their best new match there.
 
-11. **Empty-package matching**: Packages without graph content (no methods or no call edges) are matched by same package name against both empty and non-empty candidates. Unmatched packages are flagged as `REMOVED` or `NEW`.
+11. **Empty-package matching**: Packages without bytecode methods in both old and new APKs are grouped by exact package name and classified as `EMPTY` (similarity 1.0). Unmatched empty packages are flagged as `REMOVED` (if in old APK only) or `NEW` (if in new APK only).
 
-12. **Classification**: Each matched pair is classified as `MATCH` (score ≥ threshold), `CHANGED` (score > change-threshold), `REMOVED` (old package with no new match), or `NEW` (new package with no old match).
+12. **Classification**: Each matched pair is classified as `MATCH` (score ≥ threshold), `CHANGED` (score > change-threshold), `EMPTY` (exact same package name with 0 methods in both APKs), `REMOVED` (old package with no new match), or `NEW` (new package with no old match).
 
 13. **Application change distance & scalar summary**:
     To condense application evolution into a single, normalized scalar and multi-scalar profile:
-    - **Method volume weighting**: Each package pair $i$ is weighted by its method footprint $w_i = \max(M_{\text{old}, i}, M_{\text{new}, i})$. Packages flagged as `REMOVED` contribute weight $w_i = M_{\text{old}, i}$ with score $s_i = 0.0$. Packages flagged as `NEW` contribute weight $w_i = M_{\text{new}, i}$ with score $s_i = 0.0$.
+    - **Method volume weighting**: Each package pair $i$ is weighted by its method footprint $w_i = \max(M_{\text{old}, i}, M_{\text{new}, i})$. Packages flagged as `REMOVED` contribute weight $w_i = M_{\text{old}, i}$ with score $s_i = 0.0$. Packages flagged as `NEW` contribute weight $w_i = M_{\text{new}, i}$ with score $s_i = 0.0$. Packages flagged as `EMPTY` contribute weight $w_i = 0$ with score $s_i = 1.0$.
     - **Overall similarity**: Computed as the method-weighted average:
       $$\text{Similarity} = \frac{\sum_i w_i \cdot s_i}{\sum_i w_i}$$
     - **Overall change distance**: Defined as $\Delta = 1.0 - \text{Similarity}$, normalized in $[0.0, 1.0]$. A score of `0.0` represents an identical application, while `1.0` represents completely disjoint codebases.
-    - **Multi-scalar breakdown**: Calculates percentage shares of packages and code volume across `MATCH`, `CHANGED`, `REMOVED`, and `NEW` statuses.
+    - **Multi-scalar breakdown**: Calculates percentage shares of packages and code volume across `MATCH`, `CHANGED`, `REMOVED`, `NEW`, and `EMPTY` statuses.
 
 ### Obfuscation-Aware Analysis (`--match-obfuscated`)
 

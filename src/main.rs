@@ -16,6 +16,14 @@ enum Commands {
         /// Regex filter for class names (can be specified multiple times)
         #[arg(short = 'f', long = "filterclass")]
         filters: Vec<String>,
+        /// Regex blacklist filter for class names to exclude (can be specified multiple times)
+        #[arg(
+            short = 'b',
+            long = "blacklistclass",
+            alias = "blacklist",
+            alias = "blacklist-class"
+        )]
+        blacklist: Vec<String>,
         /// Run matching analysis between APKs first and use matched classes as source of truth
         #[arg(long = "match-obfuscated")]
         match_obfuscated: bool,
@@ -29,6 +37,14 @@ enum Commands {
         /// Regex filter for class names (can be specified multiple times)
         #[arg(short = 'f', long = "filterclass")]
         filters: Vec<String>,
+        /// Regex blacklist filter for class names to exclude (can be specified multiple times)
+        #[arg(
+            short = 'b',
+            long = "blacklistclass",
+            alias = "blacklist",
+            alias = "blacklist-class"
+        )]
+        blacklist: Vec<String>,
         /// Run matching analysis between APKs first and use matched classes as source of truth
         #[arg(long = "match-obfuscated")]
         match_obfuscated: bool,
@@ -47,6 +63,17 @@ enum Commands {
         /// Regex filter for method signatures (can be specified multiple times)
         #[arg(short = 's', long = "filtersmali")]
         smali_filters: Vec<String>,
+        /// Regex blacklist filter for class names to exclude (can be specified multiple times)
+        #[arg(
+            short = 'b',
+            long = "blacklistclass",
+            alias = "blacklist",
+            alias = "blacklist-class"
+        )]
+        blacklist_class_filters: Vec<String>,
+        /// Regex blacklist filter for smali lines to exclude (can be specified multiple times)
+        #[arg(long = "blacklistsmali", alias = "blacklist-smali")]
+        blacklist_smali_filters: Vec<String>,
         /// Run matching analysis between APKs first and use matched classes as source of truth
         #[arg(long = "match-obfuscated")]
         match_obfuscated: bool,
@@ -96,6 +123,14 @@ enum Commands {
         /// Regex filter for class names (can be specified multiple times)
         #[arg(short = 'f', long = "filterclass")]
         filters: Vec<String>,
+        /// Regex blacklist filter for class names to exclude (can be specified multiple times)
+        #[arg(
+            short = 'b',
+            long = "blacklistclass",
+            alias = "blacklist",
+            alias = "blacklist-class"
+        )]
+        blacklist: Vec<String>,
         /// Enable node-label consistency check for more precise matching
         #[arg(short = 'm', long = "node-matching", default_value_t = false)]
         node_matching: bool,
@@ -122,6 +157,9 @@ enum Commands {
         /// (api_android, api_androidx, api_java, api_kotlin, api_other). Repeatable or comma-separated.
         #[arg(long = "exclude-feature", value_delimiter = ',')]
         exclude_features: Vec<apkhound::matching::Feature>,
+        /// Print debug information for package and class matches, including 19-dimensional class profiles and runner-up candidates
+        #[arg(long = "debug")]
+        debug: bool,
     },
     /// Compare manifest permissions between two APKs, or list permissions of one
     Permissions {
@@ -148,6 +186,14 @@ enum Commands {
         /// Regex filter for class names (can be specified multiple times)
         #[arg(short = 'f', long = "filterclass")]
         filters: Vec<String>,
+        /// Regex blacklist filter for class names to exclude (can be specified multiple times)
+        #[arg(
+            short = 'b',
+            long = "blacklistclass",
+            alias = "blacklist",
+            alias = "blacklist-class"
+        )]
+        blacklist: Vec<String>,
         /// Include call-graph metrics (requires an extra parse pass)
         #[arg(short = 'g', long = "graph")]
         graph: bool,
@@ -169,20 +215,30 @@ fn main() {
         Commands::Callgraph {
             apk_path,
             filters,
+            blacklist,
             match_obfuscated,
-        } => commands::callgraph::handle_callgraph(apk_path, filters, match_obfuscated),
+        } => commands::callgraph::handle_callgraph(apk_path, filters, blacklist, match_obfuscated),
         Commands::Compare {
             old_apk,
             new_apk,
             filters,
+            blacklist,
             match_obfuscated,
-        } => commands::compare::handle_compare(old_apk, new_apk, filters, match_obfuscated),
+        } => commands::compare::handle_compare(
+            old_apk,
+            new_apk,
+            filters,
+            blacklist,
+            match_obfuscated,
+        ),
         Commands::Extract {
             old_apk,
             new_apk,
             output_dir,
             class_filters,
             smali_filters,
+            blacklist_class_filters,
+            blacklist_smali_filters,
             match_obfuscated,
         } => commands::extract::handle_extract(
             old_apk,
@@ -190,6 +246,8 @@ fn main() {
             output_dir,
             class_filters,
             smali_filters,
+            blacklist_class_filters,
+            blacklist_smali_filters,
             match_obfuscated,
         ),
         Commands::Trace {
@@ -218,6 +276,7 @@ fn main() {
             csv,
             show_details,
             filters,
+            blacklist,
             node_matching,
             api_weight,
             hier_weight,
@@ -226,6 +285,7 @@ fn main() {
             summary,
             score_only,
             exclude_features,
+            debug,
         } => commands::match_cmd::handle_match(
             old_apk,
             new_apk,
@@ -236,6 +296,7 @@ fn main() {
                 csv,
                 show_details,
                 filters,
+                blacklist,
                 use_node_matching: node_matching,
                 api_weight,
                 hier_weight,
@@ -244,6 +305,7 @@ fn main() {
                 summary,
                 score_only,
                 exclude_features,
+                debug,
             },
         ),
         Commands::Permissions {
@@ -259,10 +321,13 @@ fn main() {
         Commands::Stats {
             apks,
             filters,
+            blacklist,
             graph,
             format,
             match_obfuscated,
-        } => commands::stats::handle_stats(apks, filters, graph, format, match_obfuscated),
+        } => {
+            commands::stats::handle_stats(apks, filters, blacklist, graph, format, match_obfuscated)
+        }
     };
     if let Err(e) = result {
         eprintln!("error: {e}");

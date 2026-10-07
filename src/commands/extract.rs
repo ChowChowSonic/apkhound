@@ -14,15 +14,18 @@ use tracing::error;
 
 /// Unpack both APKs, diff their classes, and write the smali of every
 /// changed / added / removed method into `output_dir/{old,new}/...`.
-/// Class and smali-line filters can further narrow what is written.
+/// Class and smali-line filters (and blacklists) can further narrow what is written.
 /// When `match_obfuscated` is true, runs matching analysis first to pair
 /// classes across obfuscated names.
+#[allow(clippy::too_many_arguments)]
 pub fn handle_extract(
     old_apk: PathBuf,
     new_apk: PathBuf,
     output_dir: PathBuf,
     class_filters: Vec<String>,
     smali_filters: Vec<String>,
+    blacklist_class_filters: Vec<String>,
+    blacklist_smali_filters: Vec<String>,
     match_obfuscated: bool,
 ) -> Result<(), String> {
     let apks: Vec<Result<ApkFile, _>> = vec![old_apk, new_apk]
@@ -33,8 +36,10 @@ pub fn handle_extract(
         (Ok(old), Ok(new)) => {
             let regex: Vec<Regex> = build_regex(&class_filters);
             let smali_regex: Vec<Regex> = build_regex(&smali_filters);
-            let old_classes_vec = unpack_apk_classes(old, &regex);
-            let new_classes_vec = unpack_apk_classes(new, &regex);
+            let blacklist_regex: Vec<Regex> = build_regex(&blacklist_class_filters);
+            let blacklist_smali_regex: Vec<Regex> = build_regex(&blacklist_smali_filters);
+            let old_classes_vec = unpack_apk_classes(old, &regex, &blacklist_regex);
+            let new_classes_vec = unpack_apk_classes(new, &regex, &blacklist_regex);
 
             let match_set = if match_obfuscated {
                 let params = MatchParams::default();
@@ -60,6 +65,7 @@ pub fn handle_extract(
                 old_classes,
                 &output_dir,
                 &smali_regex,
+                &blacklist_smali_regex,
                 match_set.as_ref(),
             )
             .map_err(|e| format!("Failed to write extracted smali files: {e}"))?;
