@@ -627,6 +627,29 @@ fn test_subcommands_support_match_obfuscated_flag() {
 }
 
 #[test]
+fn test_bridge_lambdas_flag_on_graph_commands() {
+    for subcmd in ["callgraph", "trace", "stats"] {
+        let output = Command::new(binary_path())
+            .arg(subcmd)
+            .arg("--help")
+            .output()
+            .unwrap_or_else(|e| panic!("failed to run apkhound {} --help: {}", subcmd, e));
+        assert!(
+            output.status.success(),
+            "apkhound {} --help exited with failure",
+            subcmd
+        );
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        assert!(
+            stdout.contains("--bridge-lambdas"),
+            "apkhound {} --help does not mention --bridge-lambdas:\n{}",
+            subcmd,
+            stdout
+        );
+    }
+}
+
+#[test]
 fn test_compare_match_obfuscated() {
     let old = apk_path("org.videolan.vlc_3.5.4.apk");
     let new = apk_path("org.videolan.vlc_3.7.1.apk");

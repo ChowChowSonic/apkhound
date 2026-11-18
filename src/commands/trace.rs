@@ -221,6 +221,7 @@ pub fn handle_trace(
     format: Format,
     apks: Vec<PathBuf>,
     match_obfuscated: bool,
+    bridge_lambdas: bool,
 ) -> Result<(), String> {
     let start_patterns = resolve_patterns(&start_regex, src_from_file)?;
     let end_patterns = resolve_patterns(&end_regex, dest_from_file)?;
@@ -274,7 +275,7 @@ pub fn handle_trace(
 
     let start_maps: Vec<FxHashMap<String, Vec<String>>> = files
         .par_iter()
-        .map(|x| iterate_over_dex_files(x, &[], &[]))
+        .map(|x| iterate_over_dex_files(x, &[], &[], bridge_lambdas))
         .collect();
     let results: Vec<Vec<String>> = start_maps
         .par_iter()
@@ -595,6 +596,7 @@ mod tests {
             Format::Printed,
             vec![],
             false,
+            false,
         );
     }
 
@@ -608,6 +610,7 @@ mod tests {
             false,
             Format::Printed,
             vec![],
+            false,
             false,
         );
     }
@@ -624,6 +627,7 @@ mod tests {
             Format::Printed,
             vec![PathBuf::from("/nonexistent/does-not-exist.apk")],
             false,
+            false,
         );
         assert!(result.is_ok());
     }
@@ -638,6 +642,7 @@ mod tests {
                 false,
                 Format::Printed,
                 vec![],
+                false,
                 false,
             )
             .is_ok()

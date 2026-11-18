@@ -27,6 +27,9 @@ enum Commands {
         /// Run matching analysis between APKs first and use matched classes as source of truth
         #[arg(long = "match-obfuscated")]
         match_obfuscated: bool,
+        /// Bridge D8/R8-desugared lambdas: a caller that constructs a synthetic lambda class also points at its callback method
+        #[arg(long = "bridge-lambdas")]
+        bridge_lambdas: bool,
     },
     /// Compare two APKs and list class-level additions, removals, and changes
     Compare {
@@ -97,6 +100,9 @@ enum Commands {
         /// Run matching analysis between APKs first and use matched classes as source of truth
         #[arg(long = "match-obfuscated")]
         match_obfuscated: bool,
+        /// Bridge D8/R8-desugared lambdas: a caller that constructs a synthetic lambda class also points at its callback method
+        #[arg(long = "bridge-lambdas")]
+        bridge_lambdas: bool,
     },
     /// Match packages across two APKs using graph isomorphism
     #[command(name = "match")]
@@ -203,6 +209,9 @@ enum Commands {
         /// Run matching analysis between APKs first and use matched classes as source of truth
         #[arg(long = "match-obfuscated")]
         match_obfuscated: bool,
+        /// Bridge D8/R8-desugared lambdas: a caller that constructs a synthetic lambda class also points at its callback method
+        #[arg(long = "bridge-lambdas")]
+        bridge_lambdas: bool,
     },
 }
 
@@ -217,7 +226,14 @@ fn main() {
             filters,
             blacklist,
             match_obfuscated,
-        } => commands::callgraph::handle_callgraph(apk_path, filters, blacklist, match_obfuscated),
+            bridge_lambdas,
+        } => commands::callgraph::handle_callgraph(
+            apk_path,
+            filters,
+            blacklist,
+            match_obfuscated,
+            bridge_lambdas,
+        ),
         Commands::Compare {
             old_apk,
             new_apk,
@@ -258,6 +274,7 @@ fn main() {
             format,
             apks,
             match_obfuscated,
+            bridge_lambdas,
         } => commands::trace::handle_trace(
             src_regex,
             dest_regex,
@@ -266,6 +283,7 @@ fn main() {
             format,
             apks,
             match_obfuscated,
+            bridge_lambdas,
         ),
         Commands::Match {
             old_apk,
@@ -325,9 +343,16 @@ fn main() {
             graph,
             format,
             match_obfuscated,
-        } => {
-            commands::stats::handle_stats(apks, filters, blacklist, graph, format, match_obfuscated)
-        }
+            bridge_lambdas,
+        } => commands::stats::handle_stats(
+            apks,
+            filters,
+            blacklist,
+            graph,
+            format,
+            match_obfuscated,
+            bridge_lambdas,
+        ),
     };
     if let Err(e) = result {
         eprintln!("error: {e}");

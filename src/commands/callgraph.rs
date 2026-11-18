@@ -15,12 +15,14 @@ use tracing::error;
 /// DOT digraph to stdout. Optional `filters` and `blacklist` restrict which classes are
 /// included. When `match_obfuscated` is true and two APKs are given, runs
 /// matching analysis first and normalizes obfuscated node names to their
-/// matched counterparts.
+/// matched counterparts. When `bridge_lambdas` is true, desugared synthetic
+/// lambda callbacks are bridged into the graph.
 pub fn handle_callgraph(
     apk_path: Vec<PathBuf>,
     filters: Vec<String>,
     blacklist: Vec<String>,
     match_obfuscated: bool,
+    bridge_lambdas: bool,
 ) -> Result<(), String> {
     let regex: Vec<Regex> = build_regex(&filters);
     let blacklist_regex: Vec<Regex> = build_regex(&blacklist);
@@ -66,7 +68,7 @@ pub fn handle_callgraph(
             FxHashMap::<String, Vec<String>>::default,
             |mut accum: FxHashMap<String, Vec<String>>, apk_result| {
                 if let Ok(apk) = apk_result {
-                    let res = iterate_over_dex_files(apk, &regex, &blacklist_regex);
+                    let res = iterate_over_dex_files(apk, &regex, &blacklist_regex, bridge_lambdas);
                     res.iter().for_each(|(key, val)| {
                         let norm_key = normalize(key);
                         let norm_vals = val.iter().map(|v| normalize(v));

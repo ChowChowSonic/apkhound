@@ -85,7 +85,7 @@ apkhound stats app-v1.0.apk app-v1.1.apk --match-obfuscated
 Extract a call graph from one or more APK files as a Graphviz DOT digraph.
 
 ```
-apkhound callgraph <apk_path>... [-f <regex>...] [-b <regex>...] [--match-obfuscated]
+apkhound callgraph <apk_path>... [-f <regex>...] [-b <regex>...] [--match-obfuscated] [--bridge-lambdas]
 ```
 
 | Flag | Description |
@@ -93,6 +93,7 @@ apkhound callgraph <apk_path>... [-f <regex>...] [-b <regex>...] [--match-obfusc
 | `-f`, `--filterclass` | Regex filter for class/method names (repeatable) |
 | `-b`, `--blacklistclass` | Regex blacklist filter for class/method names (repeatable) |
 | `--match-obfuscated` | Correlate obfuscated classes between APKs and normalize names in the graph |
+| `--bridge-lambdas` | Add edges from lambda constructors to their callbacks for D8/R8-desugared lambdas |
 
 ### `compare`
 
@@ -133,7 +134,7 @@ Output: `<output_dir>/old/` and `<output_dir>/new/` mirroring the original direc
 Find call paths from methods matching a source regex to methods matching a destination regex.
 
 ```
-apkhound trace <src_regex> <dest_regex> <apk_path>... [-S <src_file>] [-D <dest_file>] [-f <format>] [--match-obfuscated]
+apkhound trace <src_regex> <dest_regex> <apk_path>... [-S <src_file>] [-D <dest_file>] [-f <format>] [--match-obfuscated] [--bridge-lambdas]
 ```
 
 | Flag | Description |
@@ -142,6 +143,7 @@ apkhound trace <src_regex> <dest_regex> <apk_path>... [-S <src_file>] [-D <dest_
 | `-D`, `--dest-from-file` | Treat `<dest_regex>` as a path to a file whose non-empty lines are destination regexes |
 | `-f`, `--format` | Output format: `printed` (default), `json`, `yaml`, `xml`, `csv` |
 | `--match-obfuscated` | Correlate obfuscated classes across APKs to expand source and destination search patterns |
+| `--bridge-lambdas` | Follow D8/R8-desugared lambdas by adding edges from lambda constructors to their callbacks |
 
 ```
 apkhound trace -S src_patterns.txt "loadUrl|sendTextMessage" app.apk
@@ -279,7 +281,7 @@ emit a metric diff between them. The command rejects any other number of
 APK paths.
 
 ```
-apkhound stats <apk_path> [<apk_path>] [-f <regex>...] [-b <regex>...] [-g] [--format printed|json|csv] [--match-obfuscated]
+apkhound stats <apk_path> [<apk_path>] [-f <regex>...] [-b <regex>...] [-g] [--format printed|json|csv] [--match-obfuscated] [--bridge-lambdas]
 ```
 
 | Flag | Default | Description |
@@ -289,6 +291,7 @@ apkhound stats <apk_path> [<apk_path>] [-f <regex>...] [-b <regex>...] [-g] [--f
 | `-g`, `--graph` | `false` | Also compute call-graph metrics (requires an extra parse pass) |
 | `--format` | `printed` | Output format: `printed`, `json`, or `csv` |
 | `--match-obfuscated` | `false` | Correlate obfuscated classes before computing diff and change coverage |
+| `--bridge-lambdas` | `false` | Bridge D8/R8-desugared lambda callbacks in the `--graph` metrics |
 
 Reported metrics:
 

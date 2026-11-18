@@ -62,6 +62,7 @@ pub fn handle_stats(
     graph: bool,
     format: StatsFormat,
     match_obfuscated: bool,
+    bridge_lambdas: bool,
 ) -> Result<(), String> {
     let regex: Vec<Regex> = build_regex(&filters);
     let blacklist_regex: Vec<Regex> = build_regex(&blacklist);
@@ -93,6 +94,7 @@ pub fn handle_stats(
                 &regex,
                 &blacklist_regex,
                 graph,
+                bridge_lambdas,
             );
             ApkAnalysis { classes, stats }
         })

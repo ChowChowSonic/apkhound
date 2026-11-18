@@ -6,6 +6,13 @@ use smali::android::zip::ApkFile;
 use std::str::FromStr;
 use tracing::error;
 
+pub fn jni_class_to_java(jni: &str) -> String {
+    jni.strip_prefix('L')
+        .unwrap_or(jni)
+        .strip_suffix(';')
+        .unwrap_or(jni)
+        .replace('/', ".")
+}
 /// Compile a list of regex strings into `Regex` values, logging errors for
 /// any that fail to parse.
 pub fn build_regex(filters: &[String]) -> Vec<Regex> {
@@ -110,6 +117,53 @@ pub fn compare_manifest_permissions(old: &ApkFile, new: &ApkFile) -> (Vec<String
         }
     }
     res
+}
+
+pub(crate) fn read_u16(data: &[u8], off: usize) -> Option<u16> {
+    data.get(off..off + 2)
+        .map(|b| u16::from_le_bytes([b[0], b[1]]))
+}
+pub(crate) fn read_u32(data: &[u8], off: usize) -> Option<u32> {
+    data.get(off..off + 4)
+        .map(|b| u32::from_le_bytes([b[0], b[1], b[2], b[3]]))
+}
+
+pub(crate) fn read_uleb128(data: &[u8], off: &mut usize) -> Option<u32> {
+    let mut result = 0u32;
+    let mut shift = 0u32;
+    loop {
+        let byte = *data.get(*off)?;
+        *off += 1;
+        result |= ((byte & 0x7f) as u32) << shift;
+        if byte & 0x80 == 0 {
+            return Some(result);
+        }
+        shift += 7;
+        if shift >= 32 {
+            return None;
+        }
+    }
+}
+
+fn read_dex_string(data: &[u8], string_ids_off: usize, idx: usize) -> Option<String> {
+    let str_data_offset = read_u32(data, string_ids_off + idx * 4)? as usize;
+    let mut cursor = str_data_offset;
+    let _utf16_len = read_uleb128(data, &mut cursor)?;
+    let end = data.get(cursor..)?.iter().position(|&b| b == 0)?;
+    Some(String::from_utf8_lossy(&data[cursor..cursor + end]).into_owned())
+}
+
+pub(crate) fn resolve_method_sig(data: &[u8], method_idx: usize) -> Option<String> {
+    let string_ids_offset = read_u32(data, 0x3c)? as usize;
+    let type_ids_offset = read_u32(data, 0x44)? as usize;
+    let method_ids_offset = read_u32(data, 0x5c)? as usize;
+    let item_offset = method_ids_offset + method_idx * 8;
+    let class_idx = read_u16(data, item_offset)? as usize;
+    let name_index = read_u32(data, item_offset + 4)? as usize;
+    let desc_index = read_u32(data, type_ids_offset + class_idx * 4)? as usize;
+    let class_jni = read_dex_string(data, string_ids_offset, desc_index)?;
+    let method_name = read_dex_string(data, string_ids_offset, name_index)?;
+    Some(format!("{}:{}", jni_class_to_java(&class_jni), method_name))
 }
 
 #[cfg(test)]
@@ -223,5 +277,37 @@ mod tests {
             &white,
             &black
         ));
+    }
+    #[test]
+    fn test_jni_class_to_java_simple() {
+        assert_eq!(jni_class_to_java("Lcom/example/Test;"), "com.example.Test");
+    }
+
+    #[test]
+    fn test_jni_class_to_java_inner() {
+        assert_eq!(
+            jni_class_to_java("Lcom/example/Outer$Inner;"),
+            "com.example.Outer$Inner"
+        );
+    }
+
+    #[test]
+    fn test_jni_class_to_java_no_leading_l() {
+        assert_eq!(jni_class_to_java("java/lang/String"), "java.lang.String");
+    }
+
+    #[test]
+    fn test_jni_class_to_java_no_semicolon() {
+        // Without ';' the fallback keeps the 'L' prefix
+        assert_eq!(jni_class_to_java("Ljava/lang/Object"), "Ljava.lang.Object");
+    }
+
+    #[test]
+    fn test_jni_class_to_java_array() {
+        // Array prefix '[' prevents 'L' stripping, but ';' is stripped
+        assert_eq!(
+            jni_class_to_java("[Ljava/lang/String;"),
+            "[Ljava.lang.String"
+        );
     }
 }

@@ -503,6 +503,7 @@ pub fn compute_stats(
     whitelist: &[Regex],
     blacklist: &[Regex],
     include_graph: bool,
+    bridge_lambdas: bool,
 ) -> ApkStats {
     let dex_entries = apk
         .entry_names()
@@ -520,7 +521,10 @@ pub fn compute_stats(
 
     let call_graph = if include_graph {
         Some(call_graph_stats(&iterate_over_dex_files(
-            apk, whitelist, blacklist,
+            apk,
+            whitelist,
+            blacklist,
+            bridge_lambdas,
         )))
     } else {
         None
